@@ -130,9 +130,13 @@ case "$ACTION" in
         echo "=== 15-Second Hardware State Monitor ==="
         echo "Detach and re-attach keyboard cover to verify auto-detection:"
         echo ""
-        echo "Time     | USB Bus (3206) | HID Binding | show_ime | Display"
-        echo "---------+----------------+-------------+----------+--------"
+        echo "Time     | Pogo-Pin | USB Bus (3206) | HID Binding | show_ime | Display"
+        echo "---------+----------+----------------+-------------+----------+--------"
         for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+            raw="0"
+            [ -n "$NODE" ] && [ -f "$NODE" ] && read -r raw < "$NODE" 2>/dev/null
+            case "$raw" in 1*) pogo_st="ATTACHED" ;; *) pogo_st="DETACHED" ;; esac
+
             usb_st="DETACHED"
             hid_st="UNBOUND "
             usb_d=$(get_usb_dev)
@@ -146,7 +150,7 @@ case "$ACTION" in
             if ! is_screen_on; then
                 disp="OFF"
             fi
-            echo "$(date '+%H:%M:%S') | $usb_st         | $hid_st     | $ime        | $disp"
+            echo "$(date '+%H:%M:%S') | $pogo_st | $usb_st         | $hid_st     | $ime        | $disp"
             sleep 1
         done
         echo "Test finished."
@@ -175,10 +179,14 @@ case "$ACTION" in
         echo "Author: xoxye"
         echo "Pogo-pin driver node: ${NODE:-'NOT FOUND'}"
 
+        raw="0"
+        [ -n "$NODE" ] && [ -f "$NODE" ] && read -r raw < "$NODE" 2>/dev/null
+        echo "Pogo-pin sensor (conn_status): '$raw'"
+
         usb_d=$(get_usb_dev)
         if [ -n "$usb_d" ]; then
             dev_n="${usb_d##*/}"
-            echo "Hardware USB bus device: $usb_d (vendor 3206:3ffc - CONNECTED)"
+            echo "Hardware USB bus device: $usb_d (vendor 3206:3ffc)"
             hid_st="UNBOUND (on-screen keyboard active)"
             [ -d "/sys/bus/usb/drivers/usbhid/${dev_n}:1.0" ] && hid_st="BOUND (physical input active in EventHub)"
             echo "USB-HID interface binding: $hid_st"

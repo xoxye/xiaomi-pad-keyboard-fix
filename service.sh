@@ -118,21 +118,27 @@ is_screen_on() {
 NODE=$(find_node)
 [ -n "$NODE" ] && [ -f "$NODE" ] && echo "enable_keyboard" > "$NODE" 2>/dev/null
 
-log_msg "Xiaomi Pad Keyboard Engine (v1.0.1 Ground Truth) started"
+log_msg "Xiaomi Pad Keyboard Engine (v1.0.1 Dual-Sensor) started"
 
 # ============================================================================
-# ARCHITECTURE: GROUND TRUTH USB HOTPLUG (immune to kernel IRQ contact bounce)
+# ARCHITECTURE: POGO-PIN HARDWARE SENSOR + USB BINDING (NO MCU RESET PULSE)
 # ============================================================================
 
-# INITIAL STATE: based strictly on USB bus presence
-if is_usb_attached; then
+# Read initial sensor state
+init_raw=0
+if [ -n "$NODE" ] && [ -f "$NODE" ]; then
+    read -r init_raw < "$NODE" 2>/dev/null
+    case "$init_raw" in 1*) init_raw=1 ;; *) init_raw=0 ;; esac
+fi
+
+if [ "$init_raw" = "1" ] && is_usb_attached; then
     current_state=1
     bind_usbhid
-    log_msg "Initial: ATTACHED (USB vendor 3206 detected) -> bound, ready for input"
+    log_msg "Initial: ATTACHED (pogo=1, USB present) -> bound, ready for typing"
 else
     current_state=0
     unbind_usbhid
-    log_msg "Initial: DETACHED -> unbound, on-screen keyboard ready"
+    log_msg "Initial: DETACHED (pogo=$init_raw) -> unbound, on-screen keyboard ready"
 fi
 
 unlock_done=0
@@ -151,45 +157,55 @@ while true; do
         fi
     fi
 
-    # === CHECK PHYSICAL HARDWARE PRESENCE ON USB BUS ===
-    usb_dev=$(get_usb_dev)
+    # === READ HARDWARE POGO-PIN SENSOR ===
+    raw=0
+    if [ -n "$NODE" ] && [ -f "$NODE" ]; then
+        read -r raw < "$NODE" 2>/dev/null
+        case "$raw" in 1*) raw=1 ;; *) raw=0 ;; esac
+    fi
 
-    if [ -n "$usb_dev" ]; then
-        # KEYBOARD IS PHYSICALLY CONNECTED & COMMUNICATING
+    if [ "$raw" = "1" ]; then
+        # POGO-PIN SENSOR: ATTACHED
         zero_ticks=0
 
         if [ "$current_state" -eq 0 ]; then
-            current_state=1
-            bind_usbhid
-            log_msg "ATTACHED (USB vendor 3206) -> bound, physical keyboard active"
-            notify_user "Keyboard Cover" "Keyboard connected"
-        else
-            # Ensure autosuspend remains disabled
-            if [ -f "$usb_dev/power/control" ]; then
-                read -r pwr < "$usb_dev/power/control" 2>/dev/null
-                if [ "$pwr" != "on" ]; then
-                    echo "on" > "$usb_dev/power/control" 2>/dev/null
-                    echo "-1" > "$usb_dev/power/autosuspend" 2>/dev/null
-                fi
+            # Transition from DETACHED -> ATTACHED
+            if is_usb_attached; then
+                current_state=1
+                bind_usbhid
+                log_msg "ATTACHED (pogo=1, USB detected) -> bound, physical keyboard active"
+                notify_user "Keyboard Cover" "Keyboard connected"
             fi
-            dev_name="${usb_dev##*/}"
-            for intf in /sys/bus/usb/devices/${dev_name}:1.*; do
-                if [ -d "$intf" ] && [ ! -d "/sys/bus/usb/drivers/usbhid/${intf##*/}" ]; then
-                    echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/bind 2>/dev/null
+        else
+            # Already attached: auto-heal & prevent autosuspend
+            usb_dev=$(get_usb_dev)
+            if [ -n "$usb_dev" ]; then
+                if [ -f "$usb_dev/power/control" ]; then
+                    read -r pwr < "$usb_dev/power/control" 2>/dev/null
+                    if [ "$pwr" != "on" ]; then
+                        echo "on" > "$usb_dev/power/control" 2>/dev/null
+                        echo "-1" > "$usb_dev/power/autosuspend" 2>/dev/null
+                    fi
                 fi
-            done
+                dev_name="${usb_dev##*/}"
+                for intf in /sys/bus/usb/devices/${dev_name}:1.*; do
+                    if [ -d "$intf" ] && [ ! -d "/sys/bus/usb/drivers/usbhid/${intf##*/}" ]; then
+                        echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/bind 2>/dev/null
+                    fi
+                done
+            fi
         fi
     else
-        # KEYBOARD IS NOT ON USB BUS (physically detached)
+        # POGO-PIN SENSOR: DETACHED (raw=0)
         if [ "$current_state" -eq 1 ]; then
             zero_ticks=$((zero_ticks + 1))
             # 2 consecutive ticks (0.50s debounce) confirms physical detachment
             if [ "$zero_ticks" -ge 2 ]; then
                 current_state=0
                 unbind_usbhid
-                # Keep pogo-pin VDD energized waiting for next attachment
+                # Re-ensure pogo pins are energized waiting for next attachment
                 [ -n "$NODE" ] && [ -f "$NODE" ] && echo "enable_keyboard" > "$NODE" 2>/dev/null
-                log_msg "DETACHED (USB disconnect x2) -> unbound, On-screen keyboard active"
+                log_msg "DETACHED (pogo=0 x2) -> unbound, On-screen keyboard active"
                 notify_user "Keyboard Cover" "Keyboard disconnected"
             fi
         else

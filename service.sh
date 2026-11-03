@@ -140,35 +140,39 @@ log_msg "Xiaomi Pad Keyboard Engine daemon started (PID: $$)"
 
 # --- 2. STARTUP & BOOT STATE INITIALIZATION ---
 # Never send disable_keyboard at startup - it bounces regulator rails during boot!
-# If USB device VID 3206 is already present, the keyboard was attached before boot.
-boot_has_usb=0
+# If USB device VID 3206 is already present, keyboard is physically connected and recognized.
+raw="0"
+if [ -n "$NODE" ] && [ -f "$NODE" ]; then
+    read -r raw < "$NODE" 2>/dev/null
+    case "$raw" in 1*) raw="1" ;; *) raw="0" ;; esac
+fi
+
 if [ -n "$CACHED_USB_DEV" ]; then
-    boot_has_usb=1
     bind_keyboard
-    log_msg "Boot: Physical keyboard present on USB (${CACHED_USB_DEV##*/}) -> bound"
-else
-    # Check sensor node
-    init_raw="0"
-    if [ -n "$NODE" ] && [ -f "$NODE" ]; then
-        read -r init_raw < "$NODE" 2>/dev/null
-        case "$init_raw" in 1*) init_raw="1" ;; *) init_raw="0" ;; esac
-    fi
-    if [ "$init_raw" = "1" ]; then
-        # Sensor shows contact, trigger dock reset to wake MCU if needed
+    log_msg "Startup: Physical keyboard detected on USB (${CACHED_USB_DEV##*/}) -> bound"
+    # Auto-synchronize sensor if desynchronized by early-boot regulator bounce
+    if [ "$raw" = "0" ] && [ -n "$NODE" ]; then
         echo "reset" > "$NODE" 2>/dev/null
-        sleep 0.5
-        CACHED_USB_DEV=$(get_usb_dev)
-        if [ -n "$CACHED_USB_DEV" ]; then
-            bind_keyboard
-            log_msg "Boot: Keyboard detected after reset (${CACHED_USB_DEV##*/}) -> bound"
-        else
-            unbind_keyboard
-            log_msg "Boot: Sensor=1 but USB device absent -> unbound"
-        fi
+        sleep 0.2
+        read -r raw < "$NODE" 2>/dev/null
+        case "$raw" in 1*) raw="1" ;; *) raw="0" ;; esac
+        log_msg "Startup: Sensor calibrated via IC reset -> pogo=$raw"
+    fi
+elif [ "$raw" = "1" ]; then
+    # Sensor shows contact, trigger dock reset to wake MCU if needed
+    [ -n "$NODE" ] && echo "reset" > "$NODE" 2>/dev/null
+    sleep 0.3
+    CACHED_USB_DEV=$(get_usb_dev)
+    if [ -n "$CACHED_USB_DEV" ]; then
+        bind_keyboard
+        log_msg "Startup: Keyboard detected after reset (${CACHED_USB_DEV##*/}) -> bound"
     else
         unbind_keyboard
-        log_msg "Boot: Keyboard not docked -> unbound, on-screen keyboard active"
+        log_msg "Startup: Sensor=1 but USB device absent -> unbound"
     fi
+else
+    unbind_keyboard
+    log_msg "Startup: Keyboard not docked -> unbound, on-screen keyboard active"
 fi
 
 zero_ticks=0
@@ -182,6 +186,19 @@ while true; do
             unlock_done=1
             pm grant com.android.shell android.permission.POST_NOTIFICATIONS 2>/dev/null
             cmd appops set com.android.shell POST_NOTIFICATION allow 2>/dev/null
+            
+            # Re-check and calibrate sensor state once userspace boot has completed
+            CACHED_USB_DEV=$(get_usb_dev)
+            if [ -n "$CACHED_USB_DEV" ]; then
+                read -r post_raw < "$NODE" 2>/dev/null
+                case "$post_raw" in 1*) post_raw="1" ;; *) post_raw="0" ;; esac
+                if [ "$post_raw" = "0" ] && [ -n "$NODE" ]; then
+                    echo "reset" > "$NODE" 2>/dev/null
+                    sleep 0.2
+                    log_msg "Post-Unlock: Re-synchronized sensor to 1 via IC reset"
+                fi
+                bind_keyboard
+            fi
             log_msg "Post-Unlock: boot completed, subsystem ready"
         fi
     fi
@@ -198,11 +215,7 @@ while true; do
     CACHED_USB_DEV=$(get_usb_dev)
     [ -n "$CACHED_USB_DEV" ] && USB_PRESENT=1
 
-    # Решение о состоянии (ATTACHED / DETACHED):
-    # Приоритет сенсора: raw=1 -> ATTACHED; raw=0 -> DETACHED.
-    # Защита от холодного старта: пока идет загрузка (unlock_done=0), если при старте
-    # было обнаружено USB-устройство (boot_has_usb=1), не разрываем соединение.
-    if [ "$raw" = "1" ] || { [ "$unlock_done" -eq 0 ] && [ "$boot_has_usb" -eq 1 ]; }; then
+    if [ "$raw" = "1" ]; then
         # ATTACHED: Чехол пристёгнут в рабочее положение
         zero_ticks=0
         if ! is_kb_bound; then
@@ -223,7 +236,6 @@ while true; do
     else
         # DETACHED: Чехол отстёгнут (raw=0)
         one_ticks=0
-        boot_has_usb=0
         if is_kb_bound; then
             zero_ticks=$((zero_ticks + 1))
             # Дебаунс 0.5с (2 тика по 0.25с) для фильтрации дребезга контактов

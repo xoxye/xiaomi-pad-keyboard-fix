@@ -116,64 +116,69 @@ is_screen_on() {
 }
 
 NODE=$(find_node)
-[ -n "$NODE" ] && [ -f "$NODE" ] && echo "enable_keyboard" > "$NODE" 2>/dev/null
-
-log_msg "Xiaomi Pad Keyboard Engine (v1.0.1 Dual-Sensor) started"
+log_msg "Xiaomi Pad Keyboard Engine (v1.0.1 Adaptive Polarity) started"
 
 # ============================================================================
-# ARCHITECTURE: POGO-PIN HARDWARE SENSOR + USB BINDING (NO MCU RESET PULSE)
+# INITIAL BOOT CALIBRATION & HARDWARE PROTECTION
 # ============================================================================
 
-# Read initial sensor state
-init_raw=0
+init_raw="0"
 if [ -n "$NODE" ] && [ -f "$NODE" ]; then
     read -r init_raw < "$NODE" 2>/dev/null
-    case "$init_raw" in 1*) init_raw=1 ;; *) init_raw=0 ;; esac
+    case "$init_raw" in 1*) init_raw="1" ;; *) init_raw="0" ;; esac
 fi
 
-if [ "$init_raw" = "1" ] && is_usb_attached; then
+# Determine truth on boot from USB hardware presence
+if is_usb_attached; then
     current_state=1
     bind_usbhid
-    log_msg "Initial: ATTACHED (pogo=1, USB present) -> bound, ready for typing"
+    attached_val="$init_raw"
+    log_msg "Initial: ATTACHED (USB 3206 detected) -> bound, calibrated attached_val=$attached_val"
 else
     current_state=0
     unbind_usbhid
-    log_msg "Initial: DETACHED (pogo=$init_raw) -> unbound, on-screen keyboard ready"
+    if [ "$init_raw" = "1" ]; then
+        attached_val="0"
+    else
+        attached_val="1"
+    fi
+    log_msg "Initial: DETACHED (no USB 3206) -> unbound, calibrated attached_val=$attached_val"
 fi
 
 unlock_done=0
 zero_ticks=0
 
+# ============================================================================
 # MAIN CONTROL LOOP
+# ============================================================================
 while true; do
 
     # === ONE-TIME POST-UNLOCK INITIALIZATION ===
     if [ "$unlock_done" -eq 0 ]; then
         if [ "$(getprop sys.boot_completed)" = "1" ] || [ "$(getprop dev.bootcomplete)" = "1" ]; then
             unlock_done=1
-            # Configure IME preference in background (never disrupt keyboard power!)
             ( setup_shell_permissions; settings put secure show_ime_with_hard_keyboard 1 2>/dev/null ) </dev/null >/dev/null 2>&1 &
             log_msg "Post-Unlock: boot completed, settings synchronized"
         fi
     fi
 
     # === READ HARDWARE POGO-PIN SENSOR ===
-    raw=0
+    raw="0"
     if [ -n "$NODE" ] && [ -f "$NODE" ]; then
         read -r raw < "$NODE" 2>/dev/null
-        case "$raw" in 1*) raw=1 ;; *) raw=0 ;; esac
+        case "$raw" in 1*) raw="1" ;; *) raw="0" ;; esac
     fi
 
-    if [ "$raw" = "1" ]; then
-        # POGO-PIN SENSOR: ATTACHED
+    if [ "$raw" = "$attached_val" ]; then
+        # SENSOR MATCHES ATTACHED STATE
         zero_ticks=0
 
         if [ "$current_state" -eq 0 ]; then
-            # Transition from DETACHED -> ATTACHED
+            # Transition DETACHED -> ATTACHED
             if is_usb_attached; then
                 current_state=1
                 bind_usbhid
-                log_msg "ATTACHED (pogo=1, USB detected) -> bound, physical keyboard active"
+                log_msg "ATTACHED (pogo=$raw, USB detected) -> bound, physical keyboard active"
                 notify_user "Keyboard Cover" "Keyboard connected"
             fi
         else
@@ -196,20 +201,28 @@ while true; do
             fi
         fi
     else
-        # POGO-PIN SENSOR: DETACHED (raw=0)
+        # SENSOR MATCHES DETACHED STATE (raw != attached_val)
         if [ "$current_state" -eq 1 ]; then
             zero_ticks=$((zero_ticks + 1))
             # 2 consecutive ticks (0.50s debounce) confirms physical detachment
             if [ "$zero_ticks" -ge 2 ]; then
                 current_state=0
                 unbind_usbhid
-                # Re-ensure pogo pins are energized waiting for next attachment
-                [ -n "$NODE" ] && [ -f "$NODE" ] && echo "enable_keyboard" > "$NODE" 2>/dev/null
-                log_msg "DETACHED (pogo=0 x2) -> unbound, On-screen keyboard active"
+                log_msg "DETACHED (pogo=$raw x2) -> unbound, On-screen keyboard active"
                 notify_user "Keyboard Cover" "Keyboard disconnected"
             fi
         else
             zero_ticks=0
+            # WATCHDOG / SELF-HEAL:
+            # If current_state is 0 (marked detached), but USB 3206 is actually present on bus,
+            # then polarity was flipped by contact bounce! Auto-correct immediately.
+            if is_usb_attached; then
+                attached_val="$raw"
+                current_state=1
+                bind_usbhid
+                log_msg "AUTO-CORRECT: USB 3206 present while marked detached -> recalibrated attached_val=$attached_val, bound"
+                notify_user "Keyboard Cover" "Keyboard connected"
+            fi
         fi
     fi
 

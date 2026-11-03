@@ -98,7 +98,7 @@ int main(int argc, char **argv) {
     memset(&bulk, 0, sizeof(bulk));
     bulk.ep = 0x04; // OUT endpoint
     bulk.len = 64;
-    bulk.timeout = 300; // 300ms
+    bulk.timeout = 80; // 80ms timeout (prevents blocking lag during detach)
     bulk.data = send_buf;
 
     int r = ioctl(fd, USBDEVFS_BULK, &bulk);
@@ -114,7 +114,7 @@ int main(int argc, char **argv) {
     memset(&bulk, 0, sizeof(bulk));
     bulk.ep = 0x84; // IN endpoint
     bulk.len = 64;
-    bulk.timeout = 300;
+    bulk.timeout = 80; // 80ms timeout
     bulk.data = recv_buf;
 
     r = ioctl(fd, USBDEVFS_BULK, &bulk);

@@ -145,6 +145,7 @@ unbind_keyboard() {
             fi
         fi
     done
+    CACHED_USB_DEV=""
 }
 
 is_screen_on() {
@@ -230,14 +231,11 @@ while true; do
     if [ "$current_raw" != "$LAST_RAW" ]; then
         need_check=1
         LAST_RAW="$current_raw"
-    # Триггер 2: экран включился
+    # Триггер 2: экран включился (мгновенная синхронизация при пробуждении)
     elif [ "$screen_now" -eq 1 ] && [ "$last_screen_state" -eq 0 ]; then
         need_check=1
-    # Триггер 3: периодический heartbeat (каждые 2 сек при вкл. экране, 6 сек при выкл.)
+    # Триггер 3: периодический heartbeat (только при включенном экране каждые 2 сек)
     elif [ "$screen_now" -eq 1 ] && [ "$tick" -ge 8 ]; then
-        need_check=1
-        tick=0
-    elif [ "$screen_now" -eq 0 ] && [ "$tick" -ge 2 ]; then
         need_check=1
         tick=0
     fi
@@ -250,7 +248,7 @@ while true; do
                 bind_keyboard
                 IS_BOUND=1
                 log_msg "TRANSITION: ATTACHED (hardware probe confirmed) -> bound, physical keyboard active"
-                notify_user "Keyboard Cover" "Keyboard connected"
+                (notify_user "Keyboard Cover" "Keyboard connected") &
             fi
         else
             # Чехол физически отсоединен от pogo-пинов
@@ -258,7 +256,7 @@ while true; do
                 unbind_keyboard
                 IS_BOUND=0
                 log_msg "TRANSITION: DETACHED (hardware probe confirmed) -> unbound, on-screen keyboard active"
-                notify_user "Keyboard Cover" "Keyboard disconnected"
+                (notify_user "Keyboard Cover" "Keyboard disconnected") &
             fi
         fi
     fi
@@ -266,6 +264,7 @@ while true; do
     if [ "$screen_now" -eq 1 ]; then
         sleep 0.25
     else
-        sleep 3.0
+        # При выключенном экране спим долго (10 сек) без лишних пробуждений, сохраняя Deep Sleep
+        sleep 10.0
     fi
 done

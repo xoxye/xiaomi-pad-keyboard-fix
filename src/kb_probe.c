@@ -103,6 +103,8 @@ int main(int argc, char **argv) {
 
     int r = ioctl(fd, USBDEVFS_BULK, &bulk);
     if (r < 0) {
+        unsigned int clear_ep = 0x04;
+        ioctl(fd, USBDEVFS_CLEAR_HALT, &clear_ep);
         if (verbose) perror("ioctl USBDEVFS_BULK OUT");
         ioctl(fd, USBDEVFS_RELEASEINTERFACE, &iface);
         close(fd);
@@ -118,14 +120,18 @@ int main(int argc, char **argv) {
     bulk.data = recv_buf;
 
     r = ioctl(fd, USBDEVFS_BULK, &bulk);
-    ioctl(fd, USBDEVFS_RELEASEINTERFACE, &iface);
-    close(fd);
-
     if (r < 0) {
+        unsigned int clear_ep = 0x84;
+        ioctl(fd, USBDEVFS_CLEAR_HALT, &clear_ep);
         if (verbose) perror("ioctl USBDEVFS_BULK IN");
+        ioctl(fd, USBDEVFS_RELEASEINTERFACE, &iface);
+        close(fd);
         printf("0\n");
         return 1;
     }
+
+    ioctl(fd, USBDEVFS_RELEASEINTERFACE, &iface);
+    close(fd);
 
     if (verbose) {
         fprintf(stderr, "Received %d bytes. Byte[9] = 0x%02x\n", r, (r > 9 ? recv_buf[9] : 0));

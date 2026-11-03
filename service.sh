@@ -170,6 +170,7 @@ is_screen_on() {
 }
 
 NODE=$(find_node)
+[ -n "$NODE" ] && [ -f "$NODE" ] && echo "enable_keyboard" > "$NODE" 2>/dev/null
 
 # Wait up to 3 seconds for USB device to enumerate if early boot
 for w in 1 2 3 4 5 6; do
@@ -203,6 +204,7 @@ fi
 unlock_done=0
 tick=0
 last_screen_state=1
+last_notify_time=0
 
 while true; do
     # Синхронизация после завершения загрузки системы
@@ -251,7 +253,11 @@ while true; do
                 bind_keyboard
                 IS_BOUND=1
                 log_msg "TRANSITION: ATTACHED (hardware probe confirmed) -> bound, physical keyboard active"
-                (notify_user "Keyboard Cover" "Keyboard connected") &
+                now_s=$(date +%s 2>/dev/null || echo 0)
+                if [ $((now_s - last_notify_time)) -ge 2 ]; then
+                    last_notify_time=$now_s
+                    (notify_user "Keyboard Cover" "Keyboard connected") &
+                fi
             fi
         else
             # Чехол физически отсоединен от pogo-пинов
@@ -259,7 +265,11 @@ while true; do
                 unbind_keyboard
                 IS_BOUND=0
                 log_msg "TRANSITION: DETACHED (hardware probe confirmed) -> unbound, on-screen keyboard active"
-                (notify_user "Keyboard Cover" "Keyboard disconnected") &
+                now_s=$(date +%s 2>/dev/null || echo 0)
+                if [ $((now_s - last_notify_time)) -ge 2 ]; then
+                    last_notify_time=$now_s
+                    (notify_user "Keyboard Cover" "Keyboard disconnected") &
+                fi
             fi
         fi
     fi

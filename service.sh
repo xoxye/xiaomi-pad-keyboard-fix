@@ -77,7 +77,7 @@ is_kb_bound() {
     return 1
 }
 
-# БЕЗОПАСНЫЙ BIND: включает питание и вяжет только интерфейсы Xiaomi VID 3206
+# БЕЗОПАСНЫЙ BIND: включает питание и вяжет ТОЛЬКО интерфейсы Xiaomi VID 3206
 bind_keyboard() {
     CACHED_USB_DEV=$(get_usb_dev)
     if [ -n "$CACHED_USB_DEV" ]; then
@@ -95,6 +95,7 @@ bind_keyboard() {
 }
 
 # БЕЗОПАСНЫЙ UNBIND: отвязывает ТОЛЬКО интерфейсы Xiaomi VID 3206
+# Сторонние USB-устройства (мыши, флешки, геймпады) гарантированно не затрагиваются!
 unbind_keyboard() {
     if [ -n "$CACHED_USB_DEV" ]; then
         dev_name="${CACHED_USB_DEV##*/}"
@@ -138,45 +139,33 @@ NODE=$(find_node)
 CACHED_USB_DEV=$(get_usb_dev)
 log_msg "Xiaomi Pad Keyboard Engine daemon started (PID: $$)"
 
-# --- 2. STARTUP & BOOT STATE INITIALIZATION ---
-# Never send disable_keyboard at startup - it bounces regulator rails during boot!
-# If USB device VID 3206 is already present, keyboard is physically connected and recognized.
+# --- 2. STARTUP & COLD BOOT INITIALIZATION ---
+# Дифференциальная логика (Differential Edge Detection):
+# В ядре Xiaomi драйвер soc:xiaomi_keyboard инвертирует conn_status по каждому прерыванию (conn_status = !conn_status).
+# Из-за дребезга питания при старте статус может быть как 0, так и 1.
+# Если USB VID 3206 присутствует, чехол физически подключен! Мы привязываем его и не отвязываем на старте.
+
 raw="0"
 if [ -n "$NODE" ] && [ -f "$NODE" ]; then
     read -r raw < "$NODE" 2>/dev/null
     case "$raw" in 1*) raw="1" ;; *) raw="0" ;; esac
 fi
 
+LAST_RAW="$raw"
+PENDING_RAW="$raw"
+DEBOUNCE_COUNT=0
+IS_BOUND=0
+
 if [ -n "$CACHED_USB_DEV" ]; then
     bind_keyboard
-    log_msg "Startup: Physical keyboard detected on USB (${CACHED_USB_DEV##*/}) -> bound"
-    # Auto-synchronize sensor if desynchronized by early-boot regulator bounce
-    if [ "$raw" = "0" ] && [ -n "$NODE" ]; then
-        echo "reset" > "$NODE" 2>/dev/null
-        sleep 0.2
-        read -r raw < "$NODE" 2>/dev/null
-        case "$raw" in 1*) raw="1" ;; *) raw="0" ;; esac
-        log_msg "Startup: Sensor calibrated via IC reset -> pogo=$raw"
-    fi
-elif [ "$raw" = "1" ]; then
-    # Sensor shows contact, trigger dock reset to wake MCU if needed
-    [ -n "$NODE" ] && echo "reset" > "$NODE" 2>/dev/null
-    sleep 0.3
-    CACHED_USB_DEV=$(get_usb_dev)
-    if [ -n "$CACHED_USB_DEV" ]; then
-        bind_keyboard
-        log_msg "Startup: Keyboard detected after reset (${CACHED_USB_DEV##*/}) -> bound"
-    else
-        unbind_keyboard
-        log_msg "Startup: Sensor=1 but USB device absent -> unbound"
-    fi
+    IS_BOUND=1
+    log_msg "Startup: Physical keyboard present (VID 3206, sensor=$raw) -> bound, ready for lockscreen"
 else
     unbind_keyboard
-    log_msg "Startup: Keyboard not docked -> unbound, on-screen keyboard active"
+    IS_BOUND=0
+    log_msg "Startup: Keyboard not present -> idle, on-screen keyboard active"
 fi
 
-zero_ticks=0
-one_ticks=0
 unlock_done=0
 
 while true; do
@@ -186,67 +175,47 @@ while true; do
             unlock_done=1
             pm grant com.android.shell android.permission.POST_NOTIFICATIONS 2>/dev/null
             cmd appops set com.android.shell POST_NOTIFICATION allow 2>/dev/null
-            
-            # Re-check and calibrate sensor state once userspace boot has completed
-            CACHED_USB_DEV=$(get_usb_dev)
-            if [ -n "$CACHED_USB_DEV" ]; then
-                read -r post_raw < "$NODE" 2>/dev/null
-                case "$post_raw" in 1*) post_raw="1" ;; *) post_raw="0" ;; esac
-                if [ "$post_raw" = "0" ] && [ -n "$NODE" ]; then
-                    echo "reset" > "$NODE" 2>/dev/null
-                    sleep 0.2
-                    log_msg "Post-Unlock: Re-synchronized sensor to 1 via IC reset"
-                fi
-                bind_keyboard
-            fi
             log_msg "Post-Unlock: boot completed, subsystem ready"
         fi
     fi
 
-    # 1. Чтение статуса с сенсора pogo-pin
-    raw="0"
+    # Считывание сырого состояния сенсора pogo-pin
+    current_raw="0"
     if [ -n "$NODE" ] && [ -f "$NODE" ]; then
-        read -r raw < "$NODE" 2>/dev/null
-        case "$raw" in 1*) raw="1" ;; *) raw="0" ;; esac
+        read -r current_raw < "$NODE" 2>/dev/null
+        case "$current_raw" in 1*) current_raw="1" ;; *) current_raw="0" ;; esac
     fi
 
-    # 2. Проверка USB-шины
-    USB_PRESENT=0
-    CACHED_USB_DEV=$(get_usb_dev)
-    [ -n "$CACHED_USB_DEV" ] && USB_PRESENT=1
-
-    if [ "$raw" = "1" ]; then
-        # ATTACHED: Чехол пристёгнут в рабочее положение
-        zero_ticks=0
-        if ! is_kb_bound; then
-            one_ticks=$((one_ticks + 1))
-            if [ "$one_ticks" -ge 1 ]; then
-                if [ "$USB_PRESENT" -eq 0 ] && [ -n "$NODE" ]; then
-                    # Если сенсор активен, но USB еще не определился - будим MCU
-                    echo "reset" > "$NODE" 2>/dev/null
-                    sleep 0.2
+    # Дифференциальное обнаружение физического изменения (Attach / Detach Edge)
+    if [ "$current_raw" != "$LAST_RAW" ]; then
+        if [ "$current_raw" = "$PENDING_RAW" ]; then
+            DEBOUNCE_COUNT=$((DEBOUNCE_COUNT + 1))
+            # Требуется 2 последовательных стабильных тика (0.5с), чтобы отфильтровать дребезг контактов
+            if [ "$DEBOUNCE_COUNT" -ge 2 ]; then
+                LAST_RAW="$current_raw"
+                DEBOUNCE_COUNT=0
+                
+                if [ "$IS_BOUND" -eq 1 ]; then
+                    # Предыдущее состояние было BOUND -> произошел DETACH
+                    unbind_keyboard
+                    IS_BOUND=0
+                    log_msg "TRANSITION: DETACHED (sensor edge $LAST_RAW) -> unbound, on-screen keyboard active"
+                    notify_user "Keyboard Cover" "Keyboard disconnected"
+                else
+                    # Предыдущее состояние было UNBOUND -> произошел ATTACH
+                    bind_keyboard
+                    IS_BOUND=1
+                    log_msg "TRANSITION: ATTACHED (sensor edge $LAST_RAW) -> bound, physical keyboard active"
+                    notify_user "Keyboard Cover" "Keyboard connected"
                 fi
-                bind_keyboard
-                log_msg "TRANSITION: ATTACHED (pogo=1) -> bound, physical keyboard active"
-                notify_user "Keyboard Cover" "Keyboard connected"
             fi
         else
-            one_ticks=0
+            PENDING_RAW="$current_raw"
+            DEBOUNCE_COUNT=1
         fi
     else
-        # DETACHED: Чехол отстёгнут (raw=0)
-        one_ticks=0
-        if is_kb_bound; then
-            zero_ticks=$((zero_ticks + 1))
-            # Дебаунс 0.5с (2 тика по 0.25с) для фильтрации дребезга контактов
-            if [ "$zero_ticks" -ge 2 ]; then
-                unbind_keyboard
-                log_msg "TRANSITION: DETACHED (pogo=0 x2) -> unbound, on-screen keyboard active"
-                notify_user "Keyboard Cover" "Keyboard disconnected"
-            fi
-        else
-            zero_ticks=0
-        fi
+        PENDING_RAW="$current_raw"
+        DEBOUNCE_COUNT=0
     fi
 
     if is_screen_on; then

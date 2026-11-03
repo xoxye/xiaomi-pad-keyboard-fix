@@ -22,7 +22,10 @@ echo xiaomi_kb > /proc/self/comm 2>/dev/null
 if [ -f "$PIDFILE" ]; then
     old_pid=$(cat "$PIDFILE" 2>/dev/null)
     if [ -n "$old_pid" ] && [ -d "/proc/$old_pid" ] && [ "$old_pid" -ne "$$" ]; then
-        kill -9 "$old_pid" 2>/dev/null
+        old_comm=$(cat "/proc/$old_pid/comm" 2>/dev/null)
+        if [ "$old_comm" = "xiaomi_kb" ] || grep -q "service.sh" "/proc/$old_pid/cmdline" 2>/dev/null; then
+            kill -9 "$old_pid" 2>/dev/null
+        fi
     fi
 fi
 echo "$$" > "$PIDFILE" 2>/dev/null || { PIDFILE="$MODDIR/daemon.pid"; echo "$$" > "$PIDFILE"; }
@@ -87,6 +90,7 @@ check_hardware_attached() {
 
 # БЕЗОПАСНАЯ ПРОВЕРКА: привязан ли интерфейс клавиатуры Xiaomi VID 3206
 is_kb_bound() {
+    [ -n "$CACHED_USB_DEV" ] && [ ! -d "$CACHED_USB_DEV" ] && CACHED_USB_DEV=""
     [ -z "$CACHED_USB_DEV" ] && CACHED_USB_DEV=$(get_usb_dev)
     if [ -n "$CACHED_USB_DEV" ]; then
         dev_name="${CACHED_USB_DEV##*/}"
@@ -153,16 +157,15 @@ is_screen_on() {
         if [ -f "$bl" ]; then
             read -r b < "$bl" 2>/dev/null
             [ -n "$b" ] && [ "$b" -gt 0 ] && return 0
-            return 1
         fi
     done
     for dpms_f in /sys/class/drm/*-DSI-*/dpms; do
         if [ -f "$dpms_f" ]; then
             read -r dpms_val < "$dpms_f" 2>/dev/null
             [ "$dpms_val" = "On" ] && return 0
-            return 1
         fi
     done
+    [ -e /sys/class/backlight/* ] || [ -e /sys/class/drm/*-DSI-* ] && return 1
     return 0
 }
 

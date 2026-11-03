@@ -102,7 +102,7 @@ fi
 
 # Test 6: Check background daemon
 PID=""
-for pf in /dev/xiaomi_kb.pid /data/adb/modules/xiaomi-keyboard-nabu-enabler/daemon.pid; do
+for pf in /dev/xiaomi_kb.pid /data/adb/modules/xiaomi-keyboard-nabu-enabler/daemon.pid /data/adb/modules/xiaomi-pad-keyboard-fix/daemon.pid; do
     if [ -f "$pf" ]; then
         p=$(cat "$pf" 2>/dev/null)
         if [ -n "$p" ] && [ -d "/proc/$p" ]; then
@@ -111,6 +111,9 @@ for pf in /dev/xiaomi_kb.pid /data/adb/modules/xiaomi-keyboard-nabu-enabler/daem
         fi
     fi
 done
+if [ -z "$PID" ]; then
+    PID=$(pgrep xiaomi_kb 2>/dev/null | head -n 1)
+fi
 
 if [ -n "$PID" ]; then
     log_pass "Background engine daemon is active (PID: $PID)"

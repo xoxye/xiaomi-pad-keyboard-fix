@@ -137,21 +137,31 @@ is_screen_on() {
 
 NODE=$(find_node)
 
-# Pre-flight sync: ensure driver node is enabled if keyboard is present
+# Pre-flight sync: if driver node exists, run a single clean handshake
+# to eliminate early-boot regulator bounce and read true physical contact state
 if [ -n "$NODE" ] && [ -f "$NODE" ]; then
+    echo "disable_keyboard" > "$NODE" 2>/dev/null
+    sleep 0.2
     echo "enable_keyboard" > "$NODE" 2>/dev/null
+    sleep 0.3
 fi
 
 CACHED_USB_DEV=$(get_usb_dev)
 log_msg "Xiaomi Pad Keyboard Engine daemon started (PID: $$)"
 
-# Initial boot state: if keyboard is physically present on USB, keep it bound!
-if [ -n "$CACHED_USB_DEV" ]; then
+# Initial state check based on hardware sensor
+init_raw="0"
+if [ -n "$NODE" ] && [ -f "$NODE" ]; then
+    read -r init_raw < "$NODE" 2>/dev/null
+    case "$init_raw" in 1*) init_raw="1" ;; *) init_raw="0" ;; esac
+fi
+
+if [ "$init_raw" = "1" ]; then
     bind_keyboard
-    log_msg "Boot: Physical keyboard detected (VID 3206) -> bound"
+    log_msg "Boot: Physical keyboard detected (pogo=1) -> bound"
 else
     unbind_keyboard
-    log_msg "Boot: Keyboard not present -> idle"
+    log_msg "Boot: Keyboard not docked (pogo=0) -> unbound, on-screen keyboard active"
 fi
 
 zero_ticks=0
@@ -176,40 +186,28 @@ while true; do
         case "$raw" in 1*) raw="1" ;; *) raw="0" ;; esac
     fi
 
-    # 2. Быстрая проверка присутствия USB-устройства на шине (O(1) stat)
-    usb_online=0
-    if [ -n "$CACHED_USB_DEV" ] && [ -f "$CACHED_USB_DEV/idVendor" ]; then
-        usb_online=1
-    else
-        CACHED_USB_DEV=$(get_usb_dev)
-        [ -n "$CACHED_USB_DEV" ] && usb_online=1
-    fi
-
-    # УСЛОВИЕ ПОДКЛЮЧЕНИЯ:
-    # Чехол подключен, если сенсор сообщает 1 ИЛИ устройство присутствует на USB-шине!
-    # Это полностью предотвращает ложное отключение на холодном старте (Cold Boot).
-    if [ "$raw" = "1" ] || [ "$usb_online" -eq 1 ]; then
+    if [ "$raw" = "1" ]; then
+        # ATTACHED: Чехол пристёгнут в рабочее положение
         zero_ticks=0
         if ! is_kb_bound; then
             one_ticks=$((one_ticks + 1))
             if [ "$one_ticks" -ge 1 ]; then
                 bind_keyboard
-                log_msg "TRANSITION: ATTACHED (pogo=$raw, usb=$usb_online) -> bound, physical keyboard active"
+                log_msg "TRANSITION: ATTACHED (pogo=1) -> bound, physical keyboard active"
                 notify_user "Keyboard Cover" "Keyboard connected"
             fi
         else
             one_ticks=0
         fi
     else
-        # УСЛОВИЕ ОТКЛЮЧЕНИЯ:
-        # Чехол физически отсоединён (сенсор 0 И устройство физически исчезло с шины USB)
+        # DETACHED: Чехол отстёгнут (raw=0)
         one_ticks=0
         if is_kb_bound; then
             zero_ticks=$((zero_ticks + 1))
             # Дебаунс 0.5с (2 тика) для фильтрации механического дребезга
             if [ "$zero_ticks" -ge 2 ]; then
                 unbind_keyboard
-                log_msg "TRANSITION: DETACHED (pogo=$raw, usb=$usb_online) -> unbound, on-screen keyboard active"
+                log_msg "TRANSITION: DETACHED (pogo=0 x2) -> unbound, on-screen keyboard active"
                 notify_user "Keyboard Cover" "Keyboard disconnected"
             fi
         else

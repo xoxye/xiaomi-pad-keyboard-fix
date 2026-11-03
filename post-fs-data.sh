@@ -13,18 +13,30 @@ for p in \
     fi
 done
 
+get_usb_dev() {
+    for dev in /sys/bus/usb/devices/*; do
+        if [ -f "$dev/idVendor" ]; then
+            read -r vid < "$dev/idVendor" 2>/dev/null
+            if [ "$vid" = "3206" ]; then
+                echo "$dev"
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
 # PRE-BOOT HARDWARE PROTECTION:
 # If keyboard is connected via USB bus (Vendor 3206), keep powered and bound.
 # NEVER unbind at cold boot!
-if [ -f "/sys/bus/usb/devices/1-1/idVendor" ]; then
-    read -r vid < "/sys/bus/usb/devices/1-1/idVendor" 2>/dev/null
-    if [ "$vid" = "3206" ]; then
-        echo "on" > "/sys/bus/usb/devices/1-1/power/control" 2>/dev/null
-        echo "-1" > "/sys/bus/usb/devices/1-1/power/autosuspend" 2>/dev/null
-        for intf in /sys/bus/usb/devices/1-1:1.*; do
-            if [ -d "$intf" ] && [ ! -d "/sys/bus/usb/drivers/usbhid/${intf##*/}" ]; then
-                echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/bind 2>/dev/null
-            fi
-        done
-    fi
+USB_DEV=$(get_usb_dev)
+if [ -n "$USB_DEV" ]; then
+    echo "on" > "$USB_DEV/power/control" 2>/dev/null
+    echo "-1" > "$USB_DEV/power/autosuspend" 2>/dev/null
+    dev_name="${USB_DEV##*/}"
+    for intf in /sys/bus/usb/devices/${dev_name}:1.*; do
+        if [ -d "$intf" ] && [ ! -d "/sys/bus/usb/drivers/usbhid/${intf##*/}" ]; then
+            echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/bind 2>/dev/null
+        fi
+    done
 fi

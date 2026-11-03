@@ -1,7 +1,12 @@
 #!/system/bin/sh
 MODDIR=${0%/*}
 LOGFILE="$MODDIR/service.log"
-DPMS_NODE="/sys/class/drm/card0-DSI-1/dpms"
+PIDFILE="/dev/run/xiaomi_kb.pid"
+
+# Register dedicated PID file safely
+mkdir -p /dev/run 2>/dev/null
+echo "$$" > "$PIDFILE" 2>/dev/null || PIDFILE="$MODDIR/daemon.pid"
+echo "$$" > "$PIDFILE" 2>/dev/null
 
 log_msg() {
     if [ -f "$LOGFILE" ] && [ "$(wc -l < "$LOGFILE" 2>/dev/null || echo 0)" -gt 250 ]; then
@@ -47,38 +52,80 @@ find_node() {
     return 1
 }
 
-is_usb_attached() {
-    if [ -f "/sys/bus/usb/devices/1-1/idVendor" ]; then
-        read -r vid < "/sys/bus/usb/devices/1-1/idVendor" 2>/dev/null
-        [ "$vid" = "3206" ] && return 0
-    fi
+get_usb_dev() {
+    for dev in /sys/bus/usb/devices/*; do
+        if [ -f "$dev/idVendor" ]; then
+            read -r vid < "$dev/idVendor" 2>/dev/null
+            if [ "$vid" = "3206" ]; then
+                echo "$dev"
+                return 0
+            fi
+        fi
+    done
     return 1
 }
 
+is_usb_attached() {
+    [ -n "$(get_usb_dev)" ]
+}
+
 bind_usbhid() {
-    if [ -f "/sys/bus/usb/devices/1-1/power/control" ]; then
-        echo "on" > "/sys/bus/usb/devices/1-1/power/control" 2>/dev/null
-        echo "-1" > "/sys/bus/usb/devices/1-1/power/autosuspend" 2>/dev/null
-    fi
-    for intf in /sys/bus/usb/devices/1-1:1.*; do
-        if [ -d "$intf" ] && [ ! -d "/sys/bus/usb/drivers/usbhid/${intf##*/}" ]; then
-            echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/bind 2>/dev/null
+    usb_dev=$(get_usb_dev)
+    if [ -n "$usb_dev" ]; then
+        if [ -f "$usb_dev/power/control" ]; then
+            echo "on" > "$usb_dev/power/control" 2>/dev/null
+            echo "-1" > "$usb_dev/power/autosuspend" 2>/dev/null
         fi
-    done
+        dev_name="${usb_dev##*/}"
+        for intf in /sys/bus/usb/devices/${dev_name}:1.*; do
+            if [ -d "$intf" ] && [ ! -d "/sys/bus/usb/drivers/usbhid/${intf##*/}" ]; then
+                echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/bind 2>/dev/null
+            fi
+        done
+    fi
 }
 
 unbind_usbhid() {
-    for intf in /sys/bus/usb/drivers/usbhid/1-1:1.*; do
-        if [ -e "$intf" ]; then
-            echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/unbind 2>/dev/null
+    usb_dev=$(get_usb_dev)
+    if [ -n "$usb_dev" ]; then
+        dev_name="${usb_dev##*/}"
+        for intf in /sys/bus/usb/drivers/usbhid/${dev_name}:1.*; do
+            if [ -e "$intf" ]; then
+                echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/unbind 2>/dev/null
+            fi
+        done
+    else
+        for intf in /sys/bus/usb/drivers/usbhid/*:1.*; do
+            [ -e "$intf" ] && echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/unbind 2>/dev/null
+        done
+    fi
+}
+
+is_screen_on() {
+    for bl in /sys/class/backlight/*/brightness; do
+        if [ -f "$bl" ]; then
+            read -r b < "$bl" 2>/dev/null
+            if [ -n "$b" ] && [ "$b" -gt 0 ]; then
+                return 0
+            else
+                return 1
+            fi
         fi
     done
+    for dpms_f in /sys/class/drm/*-DSI-*/dpms; do
+        if [ -f "$dpms_f" ]; then
+            read -r dpms_val < "$dpms_f" 2>/dev/null
+            [ "$dpms_val" = "On" ] && return 0
+            return 1
+        fi
+    done
+    return 0
 }
 
 NODE=$(find_node)
 [ -n "$NODE" ] && [ -f "$NODE" ] && echo "enable_keyboard" > "$NODE" 2>/dev/null
 
-log_msg "Xiaomi Pad Keyboard Engine (v1.0.0 Seamless Master) started"
+log_msg "Xiaomi Pad Keyboard Engine (v1.0.1) started"
 
 # ============================================================================
 # ARCHITECTURE: SINGLE-PROCESS (all variables shared - no subshell isolation)
@@ -88,7 +135,7 @@ log_msg "Xiaomi Pad Keyboard Engine (v1.0.0 Seamless Master) started"
 if is_usb_attached; then
     current_state=1
     bind_usbhid
-    log_msg "Initial: ATTACHED (USB 1-1 vendor 3206) -> bound, pre-unlock protection"
+    log_msg "Initial: ATTACHED (USB vendor 3206) -> bound, pre-unlock protection"
 else
     current_state=0
     unbind_usbhid
@@ -108,7 +155,7 @@ while true; do
         if [ "$(getprop sys.boot_completed)" = "1" ] || [ "$(getprop dev.bootcomplete)" = "1" ]; then
             unlock_done=1
 
-            # Background: shell permissions & IME setting (non-blocking)
+            # Background: shell permissions & IME setting (run once, non-blocking)
             ( setup_shell_permissions; settings put secure show_ime_with_hard_keyboard 1 2>/dev/null ) </dev/null >/dev/null 2>&1 &
 
             if is_usb_attached; then
@@ -149,23 +196,26 @@ while true; do
             # INSTANT CONNECT (< 0.25s)
             current_state=1
             bind_usbhid
-            settings put secure show_ime_with_hard_keyboard 1 2>/dev/null
             log_msg "ATTACHED (raw=1) -> bound, physical keyboard active"
-            notify_user "Keyboard Cover" "Keyboard connected (on-screen keyboard available)"
+            notify_user "Keyboard Cover" "Keyboard connected"
         else
             # MAINTAIN ACTIVE LINK & AUTO-HEAL
-            if [ -f "/sys/bus/usb/devices/1-1/power/control" ]; then
-                read -r pwr < "/sys/bus/usb/devices/1-1/power/control" 2>/dev/null
-                if [ "$pwr" != "on" ]; then
-                    echo "on" > "/sys/bus/usb/devices/1-1/power/control" 2>/dev/null
-                    echo "-1" > "/sys/bus/usb/devices/1-1/power/autosuspend" 2>/dev/null
+            usb_dev=$(get_usb_dev)
+            if [ -n "$usb_dev" ]; then
+                if [ -f "$usb_dev/power/control" ]; then
+                    read -r pwr < "$usb_dev/power/control" 2>/dev/null
+                    if [ "$pwr" != "on" ]; then
+                        echo "on" > "$usb_dev/power/control" 2>/dev/null
+                        echo "-1" > "$usb_dev/power/autosuspend" 2>/dev/null
+                    fi
                 fi
+                dev_name="${usb_dev##*/}"
+                for intf in /sys/bus/usb/devices/${dev_name}:1.*; do
+                    if [ -d "$intf" ] && [ ! -d "/sys/bus/usb/drivers/usbhid/${intf##*/}" ]; then
+                        echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/bind 2>/dev/null
+                    fi
+                done
             fi
-            for intf in /sys/bus/usb/devices/1-1:1.*; do
-                if [ -d "$intf" ] && [ ! -d "/sys/bus/usb/drivers/usbhid/${intf##*/}" ]; then
-                    echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/bind 2>/dev/null
-                fi
-            done
         fi
     else
         # === RAW = 0 (detached OR post-boot/post-pulse transient) ===
@@ -178,15 +228,11 @@ while true; do
             if [ "$current_state" -eq 1 ] && [ "$zero_ticks" -ge 3 ]; then
                 current_state=0
                 unbind_usbhid
-                settings put secure show_ime_with_hard_keyboard 1 2>/dev/null
+                # Re-ensure pogo pin bus is enabled on detach transition
+                [ -n "$NODE" ] && [ -f "$NODE" ] && echo "enable_keyboard" > "$NODE" 2>/dev/null
                 log_msg "DETACHED (raw=0 x3) -> unbound, On-screen keyboard active"
-                notify_user "Keyboard Cover" "Keyboard disconnected (on-screen keyboard active)"
+                notify_user "Keyboard Cover" "Keyboard disconnected"
             fi
-        fi
-
-        # KEEP POGO PINS POWERED (waiting for attachment)
-        if [ -n "$NODE" ] && [ -f "$NODE" ]; then
-            echo "enable_keyboard" > "$NODE" 2>/dev/null
         fi
     fi
 
@@ -195,12 +241,10 @@ while true; do
         settle=$((settle - 1))
     fi
 
-    # === ADAPTIVE SLEEP: 0.25s screen on, 2.0s screen off ===
-    dpms="On"
-    [ -f "$DPMS_NODE" ] && read -r dpms < "$DPMS_NODE" 2>/dev/null
-    if [ "$dpms" = "Off" ]; then
-        sleep 2
-    else
+    # === ADAPTIVE SLEEP: 0.25s screen on, 5.0s screen off (Deep Sleep friendly) ===
+    if is_screen_on; then
         sleep 0.25
+    else
+        sleep 5.0
     fi
 done

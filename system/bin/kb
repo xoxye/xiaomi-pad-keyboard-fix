@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# Xiaomi Pad 5 / Pad 5 Pro Keyboard Cover Controller (v1.0.0 Seamless Master)
+# Xiaomi Pad 5 / Pad 5 Pro Keyboard Cover Controller (v1.0.1)
 # Author: xoxye
 # Supports: status, test, bind, reset, notify, ime_on, ime_off, on, off
 
@@ -17,7 +17,76 @@ done
 
 MODDIR="${0%/*}"
 [ "$MODDIR" = "/system/bin" ] && MODDIR="/data/adb/modules/xiaomi-keyboard-nabu-enabler"
-DPMS_NODE="/sys/class/drm/card0-DSI-1/dpms"
+
+get_usb_dev() {
+    for dev in /sys/bus/usb/devices/*; do
+        if [ -f "$dev/idVendor" ]; then
+            read -r vid < "$dev/idVendor" 2>/dev/null
+            if [ "$vid" = "3206" ]; then
+                echo "$dev"
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+is_usb_attached() {
+    [ -n "$(get_usb_dev)" ]
+}
+
+bind_usbhid() {
+    usb_dev=$(get_usb_dev)
+    if [ -n "$usb_dev" ]; then
+        if [ -f "$usb_dev/power/control" ]; then
+            echo "on" > "$usb_dev/power/control" 2>/dev/null
+            echo "-1" > "$usb_dev/power/autosuspend" 2>/dev/null
+        fi
+        dev_name="${usb_dev##*/}"
+        for intf in /sys/bus/usb/devices/${dev_name}:1.*; do
+            if [ -d "$intf" ] && [ ! -d "/sys/bus/usb/drivers/usbhid/${intf##*/}" ]; then
+                echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/bind 2>/dev/null
+            fi
+        done
+    fi
+}
+
+unbind_usbhid() {
+    usb_dev=$(get_usb_dev)
+    if [ -n "$usb_dev" ]; then
+        dev_name="${usb_dev##*/}"
+        for intf in /sys/bus/usb/drivers/usbhid/${dev_name}:1.*; do
+            if [ -e "$intf" ]; then
+                echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/unbind 2>/dev/null
+            fi
+        done
+    else
+        for intf in /sys/bus/usb/drivers/usbhid/*:1.*; do
+            [ -e "$intf" ] && echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/unbind 2>/dev/null
+        done
+    fi
+}
+
+is_screen_on() {
+    for bl in /sys/class/backlight/*/brightness; do
+        if [ -f "$bl" ]; then
+            read -r b < "$bl" 2>/dev/null
+            if [ -n "$b" ] && [ "$b" -gt 0 ]; then
+                return 0
+            else
+                return 1
+            fi
+        fi
+    done
+    for dpms_f in /sys/class/drm/*-DSI-*/dpms; do
+        if [ -f "$dpms_f" ]; then
+            read -r dpms_val < "$dpms_f" 2>/dev/null
+            [ "$dpms_val" = "On" ] && return 0
+            return 1
+        fi
+    done
+    return 0
+}
 
 notify_user() {
     title="$1"
@@ -33,34 +102,6 @@ notify_user() {
     if [ -x "/data/data/com.termux/files/usr/bin/termux-toast" ]; then
         /data/data/com.termux/files/usr/bin/termux-toast -s "$title: $msg" 2>/dev/null &
     fi
-}
-
-bind_usbhid() {
-    if [ -f "/sys/bus/usb/devices/1-1/power/control" ]; then
-        echo "on" > "/sys/bus/usb/devices/1-1/power/control" 2>/dev/null
-        echo "-1" > "/sys/bus/usb/devices/1-1/power/autosuspend" 2>/dev/null
-    fi
-    for intf in /sys/bus/usb/devices/1-1:1.*; do
-        if [ -d "$intf" ] && [ ! -d "/sys/bus/usb/drivers/usbhid/${intf##*/}" ]; then
-            echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/bind 2>/dev/null
-        fi
-    done
-}
-
-unbind_usbhid() {
-    for intf in /sys/bus/usb/drivers/usbhid/1-1:1.*; do
-        if [ -e "$intf" ]; then
-            echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/unbind 2>/dev/null
-        fi
-    done
-}
-
-is_usb_attached() {
-    if [ -f "/sys/bus/usb/devices/1-1/idVendor" ]; then
-        read -r vid < "/sys/bus/usb/devices/1-1/idVendor" 2>/dev/null
-        [ "$vid" = "3206" ] && return 0
-    fi
-    return 1
 }
 
 ACTION="$1"
@@ -80,9 +121,9 @@ case "$ACTION" in
         sleep 0.5
         if is_usb_attached; then
             notify_user "Keyboard Cover" "Keyboard successfully connected!"
-            echo "SUCCESS: Keyboard cover bound and ready for typing (on-screen keyboard accessible)."
+            echo "SUCCESS: Keyboard cover bound and ready for typing."
         else
-            echo "INFO: USB device 1-1 not detected on bus (cover detached)."
+            echo "INFO: USB device with vendor 3206 not detected on bus (cover detached)."
         fi
         ;;
     notify)
@@ -104,13 +145,17 @@ case "$ACTION" in
             raw="0"
             [ -n "$NODE" ] && [ -f "$NODE" ] && read -r raw < "$NODE" 2>/dev/null
             case "$raw" in 1*) pogo_st="ATTACHED" ;; *) pogo_st="DETACHED" ;; esac
+            
             hid_st="UNBOUND "
-            [ -d "/sys/bus/usb/drivers/usbhid/1-1:1.0" ] && hid_st="BOUND   "
+            usb_d=$(get_usb_dev)
+            if [ -n "$usb_d" ]; then
+                dev_n="${usb_d##*/}"
+                [ -d "/sys/bus/usb/drivers/usbhid/${dev_n}:1.0" ] && hid_st="BOUND   "
+            fi
             ime=$(settings get secure show_ime_with_hard_keyboard 2>/dev/null)
             disp="ON "
-            if [ -f "$DPMS_NODE" ]; then
-                read -r dpms_val < "$DPMS_NODE" 2>/dev/null
-                [ "$dpms_val" = "Off" ] && disp="OFF"
+            if ! is_screen_on; then
+                disp="OFF"
             fi
             echo "$(date '+%H:%M:%S') | $pogo_st | $hid_st     | $ime        | $disp"
             sleep 1
@@ -137,7 +182,7 @@ case "$ACTION" in
         echo "On-screen keyboard button/display: FORCED OFF (show_ime=0)"
         ;;
     status)
-        echo "=== Xiaomi Pad Keyboard Cover Engine Status (v1.0.0 Seamless Master) ==="
+        echo "=== Xiaomi Pad Keyboard Cover Engine Status (v1.0.1) ==="
         echo "Author: xoxye"
         echo "Pogo-pin driver node: ${NODE:-'NOT FOUND'}"
         
@@ -145,22 +190,37 @@ case "$ACTION" in
         [ -n "$NODE" ] && [ -f "$NODE" ] && read -r raw < "$NODE" 2>/dev/null
         echo "Pogo-pin sensor (conn_status): '$raw'"
 
-        usb_pres="NOT DETECTED (bus not responding)"
-        is_usb_attached && usb_pres="DETECTED (idVendor 3206:3ffc)"
-        echo "Hardware USB bus presence: $usb_pres"
-
-        hid_st="UNBOUND (on-screen keyboard active)"
-        [ -d "/sys/bus/usb/drivers/usbhid/1-1:1.0" ] && hid_st="BOUND (physical input active in EventHub)"
-        echo "USB-HID interface binding: $hid_st"
-
-        pwr_st="N/A"
-        [ -f "/sys/bus/usb/devices/1-1/power/control" ] && read -r pwr_st < "/sys/bus/usb/devices/1-1/power/control"
-        echo "USB power management (power/control): $pwr_st"
+        usb_d=$(get_usb_dev)
+        if [ -n "$usb_d" ]; then
+            dev_n="${usb_d##*/}"
+            echo "Hardware USB bus device: $usb_d (vendor 3206)"
+            hid_st="UNBOUND (on-screen keyboard active)"
+            [ -d "/sys/bus/usb/drivers/usbhid/${dev_n}:1.0" ] && hid_st="BOUND (physical input active in EventHub)"
+            echo "USB-HID interface binding: $hid_st"
+            pwr_st="N/A"
+            [ -f "$usb_d/power/control" ] && read -r pwr_st < "$usb_d/power/control"
+            echo "USB power management (power/control): $pwr_st"
+        else
+            echo "Hardware USB bus device: NOT DETECTED (cover detached)"
+            echo "USB-HID interface binding: UNBOUND (on-screen keyboard active)"
+        fi
 
         ime_curr=$(settings get secure show_ime_with_hard_keyboard 2>/dev/null)
         echo "On-screen keyboard setting (show_ime_with_hard_keyboard): $ime_curr (1=available)"
 
-        pid=$(pgrep -f "service.sh" | grep -v "$$" | head -n 1)
+        pid=""
+        if [ -f "/dev/run/xiaomi_kb.pid" ]; then
+            read -r p < "/dev/run/xiaomi_kb.pid" 2>/dev/null
+            [ -n "$p" ] && [ -d "/proc/$p" ] && pid="$p"
+        fi
+        if [ -z "$pid" ] && [ -f "$MODDIR/daemon.pid" ]; then
+            read -r p < "$MODDIR/daemon.pid" 2>/dev/null
+            [ -n "$p" ] && [ -d "/proc/$p" ] && pid="$p"
+        fi
+        if [ -z "$pid" ]; then
+            pid=$(pgrep -f "$MODDIR/service.sh" | grep -v "$$" | head -n 1)
+        fi
+
         if [ -n "$pid" ]; then
             echo "Background hotplug service: RUNNING (PID: $pid)"
         else

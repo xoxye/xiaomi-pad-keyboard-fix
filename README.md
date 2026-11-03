@@ -22,7 +22,7 @@ Developed by **xoxye**.
 - **Zero Hardware Dropouts:** Locks USB power management into persistent `on` mode with autosuspend disabled (`-1`), preventing MCU sleep during inactivity or typing pauses.
 - **Adaptive Screen-Off Power Management:** 
   - Screen ON: polls every `0.25s` for instant detach response.
-  - Screen OFF: dynamically falls back to `2.0s` via DRM DPMS to preserve battery and allow the device to enter uninterrupted **Deep Sleep**.
+  - Screen OFF: dynamically backs off to `5.0s` with dual Backlight + DRM DPMS detection to preserve battery and allow the device to enter uninterrupted **Deep Sleep**.
 - **Ultra-Lightweight (Zero-Fork Architecture):** Uses native POSIX shell built-ins with zero child process overhead (`0.2% CPU of 1 core`, `< 800 KB RAM`).
 - **CLI Management Tool (`kb`):** Full diagnostic suite, live connection testing, and manual override directly from terminal.
 
@@ -79,7 +79,7 @@ su -c kb status
 ## ⚙️ How It Works
 
 1. **Early Boot (`post-fs-data.sh`):**
-   Powers the pogo-pin hardware bus via kernel platform driver `soc:xiaomi_keyboard` and configures `power/control` on internal USB port `1-1` before Android userspace starts.
+   Powers the pogo-pin hardware bus via kernel platform driver `soc:xiaomi_keyboard` and configures `power/control` on internal USB keyboard port (dynamically resolved by Vendor ID `3206`) before Android userspace starts.
 2. **Post-Unlock Initialization (`service.sh`):**
    Waits until `sys.boot_completed=1` (device storage decrypted), then issues a microsecond power pulse to the keyboard MCU and cleanly registers USB-HID interfaces into Android `EventHub`. A 10-second immunity window protects against post-boot bus transients.
 3. **Monolithic Hotplug Loop:**

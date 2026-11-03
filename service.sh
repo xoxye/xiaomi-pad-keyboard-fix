@@ -101,19 +101,18 @@ unbind_keyboard() {
         for intf in /sys/bus/usb/drivers/usbhid/${dev_name}:1.*; do
             [ -e "$intf" ] && echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/unbind 2>/dev/null
         done
-    else
-        for intf in /sys/bus/usb/drivers/usbhid/*:1.*; do
-            if [ -e "$intf" ]; then
-                real_p=$(readlink -f "$intf" 2>/dev/null)
-                if [ -n "$real_p" ] && [ -f "$real_p/../idVendor" ]; then
-                    read -r v < "$real_p/../idVendor" 2>/dev/null
-                    if [ "$v" = "3206" ]; then
-                        echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/unbind 2>/dev/null
-                    fi
+    fi
+    for intf in /sys/bus/usb/drivers/usbhid/*:1.*; do
+        if [ -e "$intf" ]; then
+            real_p=$(readlink -f "$intf" 2>/dev/null)
+            if [ -n "$real_p" ] && [ -f "$real_p/../idVendor" ]; then
+                read -r v < "$real_p/../idVendor" 2>/dev/null
+                if [ "$v" = "3206" ]; then
+                    echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/unbind 2>/dev/null
                 fi
             fi
-        done
-    fi
+        fi
+    done
     CACHED_USB_DEV=""
 }
 
@@ -136,32 +135,40 @@ is_screen_on() {
 }
 
 NODE=$(find_node)
-
-# Pre-flight sync: if driver node exists, run a single clean handshake
-# to eliminate early-boot regulator bounce and read true physical contact state
-if [ -n "$NODE" ] && [ -f "$NODE" ]; then
-    echo "disable_keyboard" > "$NODE" 2>/dev/null
-    sleep 0.2
-    echo "enable_keyboard" > "$NODE" 2>/dev/null
-    sleep 0.3
-fi
-
 CACHED_USB_DEV=$(get_usb_dev)
 log_msg "Xiaomi Pad Keyboard Engine daemon started (PID: $$)"
 
-# Initial state check based on hardware sensor
-init_raw="0"
-if [ -n "$NODE" ] && [ -f "$NODE" ]; then
-    read -r init_raw < "$NODE" 2>/dev/null
-    case "$init_raw" in 1*) init_raw="1" ;; *) init_raw="0" ;; esac
-fi
-
-if [ "$init_raw" = "1" ]; then
+# --- 2. STARTUP & BOOT STATE INITIALIZATION ---
+# Never send disable_keyboard at startup - it bounces regulator rails during boot!
+# If USB device VID 3206 is already present, the keyboard was attached before boot.
+boot_has_usb=0
+if [ -n "$CACHED_USB_DEV" ]; then
+    boot_has_usb=1
     bind_keyboard
-    log_msg "Boot: Physical keyboard detected (pogo=1) -> bound"
+    log_msg "Boot: Physical keyboard present on USB (${CACHED_USB_DEV##*/}) -> bound"
 else
-    unbind_keyboard
-    log_msg "Boot: Keyboard not docked (pogo=0) -> unbound, on-screen keyboard active"
+    # Check sensor node
+    init_raw="0"
+    if [ -n "$NODE" ] && [ -f "$NODE" ]; then
+        read -r init_raw < "$NODE" 2>/dev/null
+        case "$init_raw" in 1*) init_raw="1" ;; *) init_raw="0" ;; esac
+    fi
+    if [ "$init_raw" = "1" ]; then
+        # Sensor shows contact, trigger dock reset to wake MCU if needed
+        echo "reset" > "$NODE" 2>/dev/null
+        sleep 0.5
+        CACHED_USB_DEV=$(get_usb_dev)
+        if [ -n "$CACHED_USB_DEV" ]; then
+            bind_keyboard
+            log_msg "Boot: Keyboard detected after reset (${CACHED_USB_DEV##*/}) -> bound"
+        else
+            unbind_keyboard
+            log_msg "Boot: Sensor=1 but USB device absent -> unbound"
+        fi
+    else
+        unbind_keyboard
+        log_msg "Boot: Keyboard not docked -> unbound, on-screen keyboard active"
+    fi
 fi
 
 zero_ticks=0
@@ -169,7 +176,7 @@ one_ticks=0
 unlock_done=0
 
 while true; do
-    # Однократная синхронизация после завершения загрузки
+    # Post-boot unlock synchronization
     if [ "$unlock_done" -eq 0 ]; then
         if [ "$(getprop sys.boot_completed)" = "1" ] || [ "$(getprop dev.bootcomplete)" = "1" ]; then
             unlock_done=1
@@ -186,12 +193,26 @@ while true; do
         case "$raw" in 1*) raw="1" ;; *) raw="0" ;; esac
     fi
 
-    if [ "$raw" = "1" ]; then
+    # 2. Проверка USB-шины
+    USB_PRESENT=0
+    CACHED_USB_DEV=$(get_usb_dev)
+    [ -n "$CACHED_USB_DEV" ] && USB_PRESENT=1
+
+    # Решение о состоянии (ATTACHED / DETACHED):
+    # Приоритет сенсора: raw=1 -> ATTACHED; raw=0 -> DETACHED.
+    # Защита от холодного старта: пока идет загрузка (unlock_done=0), если при старте
+    # было обнаружено USB-устройство (boot_has_usb=1), не разрываем соединение.
+    if [ "$raw" = "1" ] || { [ "$unlock_done" -eq 0 ] && [ "$boot_has_usb" -eq 1 ]; }; then
         # ATTACHED: Чехол пристёгнут в рабочее положение
         zero_ticks=0
         if ! is_kb_bound; then
             one_ticks=$((one_ticks + 1))
             if [ "$one_ticks" -ge 1 ]; then
+                if [ "$USB_PRESENT" -eq 0 ] && [ -n "$NODE" ]; then
+                    # Если сенсор активен, но USB еще не определился - будим MCU
+                    echo "reset" > "$NODE" 2>/dev/null
+                    sleep 0.2
+                fi
                 bind_keyboard
                 log_msg "TRANSITION: ATTACHED (pogo=1) -> bound, physical keyboard active"
                 notify_user "Keyboard Cover" "Keyboard connected"
@@ -202,9 +223,10 @@ while true; do
     else
         # DETACHED: Чехол отстёгнут (raw=0)
         one_ticks=0
+        boot_has_usb=0
         if is_kb_bound; then
             zero_ticks=$((zero_ticks + 1))
-            # Дебаунс 0.5с (2 тика) для фильтрации механического дребезга
+            # Дебаунс 0.5с (2 тика по 0.25с) для фильтрации дребезга контактов
             if [ "$zero_ticks" -ge 2 ]; then
                 unbind_keyboard
                 log_msg "TRANSITION: DETACHED (pogo=0 x2) -> unbound, on-screen keyboard active"
@@ -218,6 +240,6 @@ while true; do
     if is_screen_on; then
         sleep 0.25
     else
-        sleep 8.0
+        sleep 4.0
     fi
 done

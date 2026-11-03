@@ -1,6 +1,6 @@
 id=xiaomi-keyboard-nabu-enabler
 name=Xiaomi Pad Keyboard Cover Engine
-version=v1.0.1
-versionCode=1010
+version=v1.1
+versionCode=1100
 author=xoxye
 description=Seamless keyboard cover driver for Xiaomi Pad 5/6 series: instant typing on cold boot, zero reconnects, instant on-screen keyboard on detach, zero dropouts.

@@ -4,6 +4,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <errno.h>
+#include <sys/file.h>
 #include <sys/ioctl.h>
 #include <linux/usbdevice_fs.h>
 
@@ -52,18 +54,29 @@ int main(int argc, char **argv) {
         verbose = 1;
     }
 
+    // Cooperative lock between concurrent probes (daemon vs CLI kb)
+    int lock_fd = open("/dev/xiaomi_kb_probe.lock", O_RDWR | O_CREAT, 0666);
+    if (lock_fd >= 0) {
+        for (int i = 0; i < 15; i++) {
+            if (flock(lock_fd, LOCK_EX | LOCK_NB) == 0) break;
+            usleep(20000); // 20ms
+        }
+    }
+
     char devpath[256] = {0};
     if (find_xiaomi_usb_path(devpath, sizeof(devpath)) != 0) {
         if (verbose) fprintf(stderr, "Error: Xiaomi USB device (VID 3206) not found\n");
+        if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
         printf("0\n");
-        return 1;
+        return 1; // DETACHED
     }
 
-    int fd = open(devpath, O_RDWR);
+    int fd = open(devpath, O_RDWR | O_CLOEXEC);
     if (fd < 0) {
-        if (verbose) fprintf(stderr, "Error: Cannot open USB device %s\n", devpath);
+        if (verbose) fprintf(stderr, "Error: Cannot open USB device %s (errno=%d: %s)\n", devpath, errno, strerror(errno));
+        if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
         printf("0\n");
-        return 1;
+        return 1; // DETACHED
     }
 
     // Detach kernel driver from interface 2 if attached
@@ -74,13 +87,24 @@ int main(int argc, char **argv) {
     oper.data = NULL;
     ioctl(fd, USBDEVFS_IOCTL, &oper);
 
-    // Claim interface 2
+    // Claim interface 2 with retry loop to prevent race conditions (EBUSY)
     int iface = 2;
-    if (ioctl(fd, USBDEVFS_CLAIMINTERFACE, &iface) < 0) {
+    int claimed = 0;
+    for (int retry = 0; retry < 5; retry++) {
+        if (ioctl(fd, USBDEVFS_CLAIMINTERFACE, &iface) == 0) {
+            claimed = 1;
+            break;
+        }
+        usleep(20000); // 20ms
+    }
+
+    if (!claimed) {
         if (verbose) perror("ioctl USBDEVFS_CLAIMINTERFACE");
         close(fd);
-        printf("0\n");
-        return 1;
+        if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
+        // Exit code 2 (BUSY/TRANSIENT): caller must NOT treat this as DETACHED
+        printf("-1\n");
+        return 2;
     }
 
     // Xiaomi vendor command: [0x4e, 0x31, 0x80, 0x38, 0xa1, 0x01, 0x01, 0xda]
@@ -98,7 +122,7 @@ int main(int argc, char **argv) {
     memset(&bulk, 0, sizeof(bulk));
     bulk.ep = 0x04; // OUT endpoint
     bulk.len = 64;
-    bulk.timeout = 80; // 80ms timeout (prevents blocking lag during detach)
+    bulk.timeout = 120; // 120ms timeout (rock-solid under CPU frequency scaling)
     bulk.data = send_buf;
 
     int r = ioctl(fd, USBDEVFS_BULK, &bulk);
@@ -108,6 +132,7 @@ int main(int argc, char **argv) {
         if (verbose) perror("ioctl USBDEVFS_BULK OUT");
         ioctl(fd, USBDEVFS_RELEASEINTERFACE, &iface);
         close(fd);
+        if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
         printf("0\n");
         return 1;
     }
@@ -116,7 +141,7 @@ int main(int argc, char **argv) {
     memset(&bulk, 0, sizeof(bulk));
     bulk.ep = 0x84; // IN endpoint
     bulk.len = 64;
-    bulk.timeout = 80; // 80ms timeout
+    bulk.timeout = 120; // 120ms timeout
     bulk.data = recv_buf;
 
     r = ioctl(fd, USBDEVFS_BULK, &bulk);
@@ -126,12 +151,14 @@ int main(int argc, char **argv) {
         if (verbose) perror("ioctl USBDEVFS_BULK IN");
         ioctl(fd, USBDEVFS_RELEASEINTERFACE, &iface);
         close(fd);
+        if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
         printf("0\n");
         return 1;
     }
 
     ioctl(fd, USBDEVFS_RELEASEINTERFACE, &iface);
     close(fd);
+    if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
 
     if (verbose) {
         fprintf(stderr, "Received %d bytes. Byte[9] = 0x%02x\n", r, (r > 9 ? recv_buf[9] : 0));
@@ -144,11 +171,13 @@ int main(int argc, char **argv) {
 
     if (r >= 10) {
         // Xiaomi response header: 0x24 ('$'), 0x31 ('1')
-        unsigned char b9 = recv_buf[9];
-        // (recBuf[9] & 0x63) == 0x23: MIUI attached condition
-        if ((b9 & 0x63) == 0x23) {
-            printf("1\n");
-            return 0; // ATTACHED
+        if (recv_buf[0] == 0x24 && recv_buf[1] == 0x31) {
+            unsigned char b9 = recv_buf[9];
+            // (recBuf[9] & 0x63) == 0x23: MIUI attached condition
+            if ((b9 & 0x63) == 0x23) {
+                printf("1\n");
+                return 0; // ATTACHED
+            }
         }
     }
 

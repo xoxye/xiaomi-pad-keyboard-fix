@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# Xiaomi Pad 5 / Pad 5 Pro Keyboard Cover Controller (v1.0.1)
+# Xiaomi Pad 5 / Pad 5 Pro Keyboard Cover Controller (v1.1)
 # Author: xoxye
 # Supports: status, test, bind, reset, notify, ime_on, ime_off, on, off
 
@@ -15,8 +15,31 @@ for p in \
     fi
 done
 
-MODDIR="${0%/*}"
-[ "$MODDIR" = "/system/bin" ] && MODDIR="/data/adb/modules/xiaomi-keyboard-nabu-enabler"
+MODDIR="$(dirname "$(readlink -f "$0")")"
+if [ "$MODDIR" = "/system/bin" ]; then
+    for md in /data/adb/modules/*xiaomi*keyboard* \
+              /data/adb/modules/xiaomi-keyboard-nabu-enabler \
+              /data/adb/modules/xiaomi-pad-keyboard-fix; do
+        if [ -d "$md" ]; then
+            MODDIR="$md"
+            break
+        fi
+    done
+fi
+
+find_probe_bin() {
+    for pb in "$MODDIR/system/bin/kb_probe" \
+              "$MODDIR/kb_probe" \
+              /data/adb/modules/*xiaomi*keyboard*/system/bin/kb_probe \
+              "/system/bin/kb_probe" \
+              "/data/local/tmp/kb_probe"; do
+        if [ -x "$pb" ]; then
+            echo "$pb"
+            return 0
+        fi
+    done
+    return 1
+}
 
 get_usb_dev() {
     for dev in /sys/bus/usb/devices/*; do
@@ -140,14 +163,16 @@ case "$ACTION" in
             case "$raw" in 1*) irq_st="1" ;; *) irq_st="0" ;; esac
 
             probe_st="DETACHED"
-            for pb in "$MODDIR/system/bin/kb_probe" "/system/bin/kb_probe" "/data/local/tmp/kb_probe"; do
-                if [ -x "$pb" ]; then
-                    if "$pb" >/dev/null 2>&1; then
-                        probe_st="ATTACHED"
-                    fi
-                    break
+            pb=$(find_probe_bin)
+            if [ -n "$pb" ]; then
+                res=$("$pb" 2>/dev/null)
+                ec=$?
+                if [ "$ec" -eq 0 ] && [ "$res" = "1" ]; then
+                    probe_st="ATTACHED"
+                elif [ "$ec" -eq 2 ]; then
+                    probe_st="BUSY    "
                 fi
-            done
+            fi
 
             hid_st="UNBOUND "
             usb_d=$(get_usb_dev)
@@ -184,7 +209,7 @@ case "$ACTION" in
         echo "On-screen keyboard button/display: FORCED OFF (show_ime=0)"
         ;;
     status)
-        echo "=== Xiaomi Pad Keyboard Cover Engine Status (v1.0.1) ==="
+        echo "=== Xiaomi Pad Keyboard Cover Engine Status (v1.1) ==="
         echo "Author: xoxye"
         echo "Pogo-pin driver node: ${NODE:-'NOT FOUND'}"
 
@@ -193,14 +218,16 @@ case "$ACTION" in
         echo "Pogo-pin IRQ flip-flop (conn_status): '$raw'"
 
         probe_st="DETACHED (no contact)"
-        for pb in "$MODDIR/system/bin/kb_probe" "/system/bin/kb_probe" "/data/local/tmp/kb_probe"; do
-            if [ -x "$pb" ]; then
-                if "$pb" >/dev/null 2>&1; then
-                    probe_st="ATTACHED (pogo-pins contact verified)"
-                fi
-                break
+        pb=$(find_probe_bin)
+        if [ -n "$pb" ]; then
+            res=$("$pb" 2>/dev/null)
+            ec=$?
+            if [ "$ec" -eq 0 ] && [ "$res" = "1" ]; then
+                probe_st="ATTACHED (pogo-pins contact verified)"
+            elif [ "$ec" -eq 2 ]; then
+                probe_st="BUSY (interface locked by active probe)"
             fi
-        done
+        fi
         echo "Hardware bridge probe (kb_probe): $probe_st"
 
         usb_d=$(get_usb_dev)

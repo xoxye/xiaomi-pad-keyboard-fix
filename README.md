@@ -30,7 +30,7 @@ Developed by **xoxye**.
 - **Zero Hardware Dropouts:** Locks USB power management into persistent `on` mode with autosuspend disabled (`-1`), preventing MCU sleep during inactivity or typing pauses.
 - **Adaptive Screen-Off Power Management:** 
   - Screen ON: polls every `0.25s` for instant detach response.
-  - Screen OFF: dynamically backs off to `5.0s` with dual Backlight + DRM DPMS detection to preserve battery and allow the device to enter uninterrupted **Deep Sleep**.
+  - Screen OFF: dynamically backs off to `1.5s` with dual Backlight + DRM DPMS detection to preserve battery and allow the device to enter uninterrupted **Deep Sleep** while ensuring sub-second response when unlocking.
 - **Ultra-Lightweight (Zero-Fork Architecture):** Uses native POSIX shell built-ins with zero child process overhead (`0.2% CPU of 1 core`, `< 800 KB RAM`).
 - **CLI Management Tool (`kb`):** Full diagnostic suite, live connection testing, and manual override directly from terminal.
 

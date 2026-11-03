@@ -1,5 +1,5 @@
 ui_print "**********************************************"
-ui_print "   Xiaomi Pad Keyboard Engine (v1.0.1)"
+ui_print "   Xiaomi Pad Keyboard Engine (v1.1)"
 ui_print "             Author: xoxye"
 ui_print "**********************************************"
 
@@ -43,7 +43,7 @@ ui_print "- Seamless Hotplug & Instant On-Screen Keyboard on Detach: ACTIVE"
 ui_print "- Continuous Pogo-Pin Hardware Power: ACTIVE"
 ui_print "- Instant Dynamic USB-HID Auto-Binding on Attach: ACTIVE"
 ui_print "- Continuous USB Hardware Link (Zero Dropouts): ACTIVE"
-ui_print "- Screen-Off Adaptive Backoff (8.0s sleep for Deep Sleep): ACTIVE"
+ui_print "- Screen-Off Responsive Sleep (1.5s interval with Deep Sleep): ACTIVE"
 ui_print "- Safe Process Management (Dedicated PID): ACTIVE"
 
 # Create symlink for xiaomi-keyboard to eliminate duplicate binary (DRY)
@@ -56,6 +56,9 @@ set_perm "$MODPATH/service.sh" 0 0 0755
 set_perm "$MODPATH/system/bin/kb" 0 0 0755
 set_perm "$MODPATH/system/bin/kb_probe" 0 0 0755
 [ -f "$MODPATH/test_cycle.sh" ] && set_perm "$MODPATH/test_cycle.sh" 0 0 0755
+
+# Ensure system_file SELinux label on strict Enforcing kernels
+chcon -R u:object_r:system_file:s0 "$MODPATH/system" 2>/dev/null
 
 ui_print "- Installation complete! Please reboot."
 ui_print "**********************************************"

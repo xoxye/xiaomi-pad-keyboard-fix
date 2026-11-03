@@ -1,11 +1,11 @@
 #!/system/bin/sh
-MODDIR=${0%/*}
+MODDIR="$(dirname "$(readlink -f "$0")")"
 LOGFILE="$MODDIR/service.log"
 PIDFILE="/dev/xiaomi_kb.pid"
 PROBE_BIN="$MODDIR/system/bin/kb_probe"
 if [ ! -x "$PROBE_BIN" ]; then
-    for pb in "/data/adb/modules/xiaomi-keyboard-nabu-enabler/system/bin/kb_probe" \
-              "/data/adb/modules/xiaomi-pad-keyboard-fix/system/bin/kb_probe" \
+    for pb in "$MODDIR/kb_probe" \
+              "/data/adb/modules/$(basename "$MODDIR")/system/bin/kb_probe" \
               "/system/bin/kb_probe" \
               "/data/local/tmp/kb_probe"; do
         if [ -x "$pb" ]; then
@@ -74,11 +74,22 @@ get_usb_dev() {
 
 # АППАРАТНАЯ ПРОВЕРКА ПОДКЛЮЧЕНИЯ ЧЕХЛА (Hardware Direct Query):
 # Опрашивает USB-мост (VID 3206) через вендорный протокол Xiaomi (Interface 2, commandGetConnectState).
-# Возвращает 0 если чехол физически соединен с pogo-пинами, 1 если отключен.
+# Возвращает:
+#   0 - физически подключен (ATTACHED)
+#   1 - физически отключен (DETACHED)
+#   2 - шина занята (BUSY / EBUSY) -> сохраняем текущее состояние
 check_hardware_attached() {
     if [ -x "$PROBE_BIN" ]; then
         "$PROBE_BIN" >/dev/null 2>&1
-        return $?
+        ec=$?
+        if [ "$ec" -eq 0 ]; then
+            return 0
+        elif [ "$ec" -eq 1 ]; then
+            return 1
+        else
+            # Exit code 2 (BUSY/TRANSIENT): не сбрасываем статус при коллизии
+            [ "${IS_BOUND:-0}" -eq 1 ] && return 0 || return 1
+        fi
     fi
     # Fallback на системную ноду, если бинарник недоступен
     if [ -n "$NODE" ] && [ -f "$NODE" ]; then
@@ -239,6 +250,10 @@ while true; do
     # Триггер 2: экран включился (мгновенная синхронизация при пробуждении)
     elif [ "$screen_now" -eq 1 ] && [ "$last_screen_state" -eq 0 ]; then
         need_check=1
+        # Проверяем persistent power/control после пробуждения
+        if [ "$IS_BOUND" -eq 1 ] && [ -n "$CACHED_USB_DEV" ] && [ -f "$CACHED_USB_DEV/power/control" ]; then
+            echo "on" > "$CACHED_USB_DEV/power/control" 2>/dev/null
+        fi
     # Триггер 3: периодический heartbeat (только при включенном экране каждые 2 сек)
     elif [ "$screen_now" -eq 1 ] && [ "$tick" -ge 8 ]; then
         need_check=1
@@ -277,7 +292,8 @@ while true; do
     if [ "$screen_now" -eq 1 ]; then
         sleep 0.25
     else
-        # При выключенном экране спим долго (10 сек) без лишних пробуждений, сохраняя Deep Sleep
-        sleep 10.0
+        # При выключенном экране спим короткими тактами (1.5 сек):
+        # нулевая нагрузка на CPU, но быстрый отклик на включение экрана
+        sleep 1.5
     fi
 done

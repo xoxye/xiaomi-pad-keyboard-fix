@@ -17,7 +17,7 @@ log_fail() {
 
 echo "========================================================"
 echo " Xiaomi Pad Keyboard Engine Automated Test Suite"
-echo " Target: elish / Qualcomm SM8250 / KernelSU root"
+echo " Target: elish / Qualcomm SM8250 / KernelSU / Magisk root"
 echo "========================================================"
 
 # Test 1: Root check
@@ -28,8 +28,12 @@ fi
 log_pass "Root access verified (uid=0)"
 
 # Test 2: Locate kb_probe binary
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 PROBE_BIN=""
-for p in /data/adb/modules/xiaomi-keyboard-nabu-enabler/system/bin/kb_probe \
+for p in "$SCRIPT_DIR/system/bin/kb_probe" \
+         "$SCRIPT_DIR/kb_probe" \
+         /data/adb/modules/*xiaomi*keyboard*/system/bin/kb_probe \
+         /data/adb/modules/xiaomi-keyboard-nabu-enabler/system/bin/kb_probe \
          /data/adb/modules/xiaomi-pad-keyboard-fix/system/bin/kb_probe \
          /system/bin/kb_probe \
          /data/local/tmp/kb_probe; do
@@ -71,9 +75,12 @@ if [ -n "$PROBE_BIN" ]; then
     if [ "$probe_exit" -eq 0 ] && [ "$probe_raw" = "1" ]; then
         HW_ATTACHED=1
         log_pass "Direct hardware probe: ATTACHED (exit=0, output=1)"
-    elif [ "$probe_exit" -ne 0 ] && [ "$probe_raw" = "0" ]; then
+    elif [ "$probe_exit" -eq 1 ] && [ "$probe_raw" = "0" ]; then
         HW_ATTACHED=0
-        log_pass "Direct hardware probe: DETACHED (exit=$probe_exit, output=0)"
+        log_pass "Direct hardware probe: DETACHED (exit=1, output=0)"
+    elif [ "$probe_exit" -eq 2 ]; then
+        HW_ATTACHED=2
+        log_pass "Direct hardware probe: BUSY / TRANSIENT (exit=2, concurrency protection active)"
     else
         log_fail "Direct hardware probe returned unexpected result: exit=$probe_exit, output='$probe_raw'"
         HW_ATTACHED=-1
@@ -102,7 +109,7 @@ fi
 
 # Test 6: Check background daemon
 PID=""
-for pf in /dev/xiaomi_kb.pid /data/adb/modules/xiaomi-keyboard-nabu-enabler/daemon.pid /data/adb/modules/xiaomi-pad-keyboard-fix/daemon.pid; do
+for pf in /dev/xiaomi_kb.pid "$SCRIPT_DIR/daemon.pid" /data/adb/modules/*xiaomi*keyboard*/daemon.pid; do
     if [ -f "$pf" ]; then
         p=$(cat "$pf" 2>/dev/null)
         if [ -n "$p" ] && [ -d "/proc/$p" ]; then
@@ -153,7 +160,14 @@ if [ "$1" = "--monitor" ] || [ "$1" = "-m" ]; then
     end_time=$(( $(date +%s) + DURATION ))
     while [ $(date +%s) -lt $end_time ]; do
         p_val=$("$PROBE_BIN" 2>/dev/null)
-        [ "$p_val" = "1" ] && p_txt="ATTACHED" || p_txt="DETACHED"
+        p_exit=$?
+        if [ "$p_exit" -eq 0 ] && [ "$p_val" = "1" ]; then
+            p_txt="ATTACHED"
+        elif [ "$p_exit" -eq 2 ]; then
+            p_txt="BUSY    "
+        else
+            p_txt="DETACHED"
+        fi
         
         irq_bit="0"
         node="/sys/bus/platform/drivers/xiaomi-keyboard/soc:xiaomi_keyboard/xiaomi_keyboard_conn_status"

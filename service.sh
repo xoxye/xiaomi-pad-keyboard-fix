@@ -114,7 +114,6 @@ unbind_keyboard() {
             fi
         fi
     done
-    CACHED_USB_DEV=""
 }
 
 is_screen_on() {
@@ -139,11 +138,11 @@ NODE=$(find_node)
 CACHED_USB_DEV=$(get_usb_dev)
 log_msg "Xiaomi Pad Keyboard Engine daemon started (PID: $$)"
 
-# --- 2. STARTUP & COLD BOOT INITIALIZATION ---
-# Дифференциальная логика (Differential Edge Detection):
-# В ядре Xiaomi драйвер soc:xiaomi_keyboard инвертирует conn_status по каждому прерыванию (conn_status = !conn_status).
-# Из-за дребезга питания при старте статус может быть как 0, так и 1.
-# Если USB VID 3206 присутствует, чехол физически подключен! Мы привязываем его и не отвязываем на старте.
+# --- 2. STARTUP & COLD BOOT SYNCHRONIZATION ---
+# В ядре Xiaomi драйвер soc:xiaomi_keyboard при старте питания производит импульсы,
+# оставляющие conn_status = 0 при холодной загрузке.
+# Если USB-мост VID 3206 присутствует, мы сразу привязываем клавиатуру,
+# обеспечивая мгновенную доступность ввода на экране блокировки.
 
 raw="0"
 if [ -n "$NODE" ] && [ -f "$NODE" ]; then
@@ -151,11 +150,7 @@ if [ -n "$NODE" ] && [ -f "$NODE" ]; then
     case "$raw" in 1*) raw="1" ;; *) raw="0" ;; esac
 fi
 
-LAST_RAW="$raw"
-PENDING_RAW="$raw"
-DEBOUNCE_COUNT=0
-IS_BOUND=0
-
+# На старте всегда связываем для готовности экрана блокировки
 if [ -n "$CACHED_USB_DEV" ]; then
     bind_keyboard
     IS_BOUND=1
@@ -166,16 +161,34 @@ else
     log_msg "Startup: Keyboard not present -> idle, on-screen keyboard active"
 fi
 
+# Режим защиты ранней загрузки (Boot Immunity Window):
+# Предотвращает ложный unbind на первых секундах до завершения старта системы
+boot_immune=1
+boot_start_time=$(date +%s 2>/dev/null || echo 0)
+
+LAST_STABLE_RAW="$raw"
+PENDING_RAW="$raw"
+DEBOUNCE_COUNT=0
 unlock_done=0
 
 while true; do
-    # Post-boot unlock synchronization
+    # Синхронизация после завершения загрузки системы
     if [ "$unlock_done" -eq 0 ]; then
         if [ "$(getprop sys.boot_completed)" = "1" ] || [ "$(getprop dev.bootcomplete)" = "1" ]; then
             unlock_done=1
             pm grant com.android.shell android.permission.POST_NOTIFICATIONS 2>/dev/null
             cmd appops set com.android.shell POST_NOTIFICATION allow 2>/dev/null
             log_msg "Post-Unlock: boot completed, subsystem ready"
+        fi
+    fi
+
+    # Снятие иммунитета загрузки через 10 секунд после старта демона или при явном sensor=1
+    if [ "$boot_immune" -eq 1 ]; then
+        now_time=$(date +%s 2>/dev/null || echo 0)
+        elapsed=$((now_time - boot_start_time))
+        if [ "$elapsed" -ge 10 ] || [ "$raw" = "1" ]; then
+            boot_immune=0
+            log_msg "Boot Immunity expired (elapsed=${elapsed}s, sensor=$raw), active management enabled"
         fi
     fi
 
@@ -186,27 +199,31 @@ while true; do
         case "$current_raw" in 1*) current_raw="1" ;; *) current_raw="0" ;; esac
     fi
 
-    # Дифференциальное обнаружение физического изменения (Attach / Detach Edge)
-    if [ "$current_raw" != "$LAST_RAW" ]; then
+    # Фильтрация дребезга контактов (Debounce Filter: 2 последовательных тика по 0.25с = 0.5с)
+    if [ "$current_raw" != "$LAST_STABLE_RAW" ]; then
         if [ "$current_raw" = "$PENDING_RAW" ]; then
             DEBOUNCE_COUNT=$((DEBOUNCE_COUNT + 1))
-            # Требуется 2 последовательных стабильных тика (0.5с), чтобы отфильтровать дребезг контактов
             if [ "$DEBOUNCE_COUNT" -ge 2 ]; then
-                LAST_RAW="$current_raw"
+                LAST_STABLE_RAW="$current_raw"
                 DEBOUNCE_COUNT=0
-                
-                if [ "$IS_BOUND" -eq 1 ]; then
-                    # Предыдущее состояние было BOUND -> произошел DETACH
-                    unbind_keyboard
-                    IS_BOUND=0
-                    log_msg "TRANSITION: DETACHED (sensor edge $LAST_RAW) -> unbound, on-screen keyboard active"
-                    notify_user "Keyboard Cover" "Keyboard disconnected"
+
+                # АБСОЛЮТНАЯ ПРЯМАЯ ЛОГИКА (БЕЗ ТРИГГЕРОВ / ИНВЕРСИЙ):
+                # 1 = ФИЗИЧЕСКИ ПОДКЛЮЧЕН -> ВСЕГДА BIND!
+                # 0 = ФИЗИЧЕСКИ ОТКЛЮЧЕН -> ВСЕГДА UNBIND!
+                if [ "$LAST_STABLE_RAW" = "1" ]; then
+                    if [ "$IS_BOUND" -eq 0 ]; then
+                        bind_keyboard
+                        IS_BOUND=1
+                        log_msg "TRANSITION: ATTACHED (sensor=1) -> bound, physical keyboard active"
+                        notify_user "Keyboard Cover" "Keyboard connected"
+                    fi
                 else
-                    # Предыдущее состояние было UNBOUND -> произошел ATTACH
-                    bind_keyboard
-                    IS_BOUND=1
-                    log_msg "TRANSITION: ATTACHED (sensor edge $LAST_RAW) -> bound, physical keyboard active"
-                    notify_user "Keyboard Cover" "Keyboard connected"
+                    if [ "$boot_immune" -eq 0 ] && [ "$IS_BOUND" -eq 1 ]; then
+                        unbind_keyboard
+                        IS_BOUND=0
+                        log_msg "TRANSITION: DETACHED (sensor=0) -> unbound, on-screen keyboard active"
+                        notify_user "Keyboard Cover" "Keyboard disconnected"
+                    fi
                 fi
             fi
         else
@@ -221,6 +238,6 @@ while true; do
     if is_screen_on; then
         sleep 0.25
     else
-        sleep 4.0
+        sleep 3.0
     fi
 done

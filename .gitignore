@@ -1,0 +1,12 @@
+# Built zip packages
+*.zip
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
+
+# Runtime logs
+service.log
+*.tmp

@@ -1,0 +1,7 @@
+# Enforce LF endings on all platforms for shell scripts and Magisk properties
+* text=auto eol=lf
+*.sh text eol=lf
+*.prop text eol=lf
+kb text eol=lf
+update-binary text eol=lf
+updater-script text eol=lf

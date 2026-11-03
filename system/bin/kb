@@ -1,0 +1,184 @@
+#!/system/bin/sh
+# Xiaomi Pad 5 / Pad 5 Pro Keyboard Cover Controller (v1.0.0 Seamless Master)
+# Author: xoxye
+# Supports: status, test, bind, reset, notify, ime_on, ime_off, on, off
+
+NODE=""
+for p in \
+    "/sys/bus/platform/drivers/xiaomi-keyboard/soc:xiaomi_keyboard/xiaomi_keyboard_conn_status" \
+    "/sys/devices/platform/soc/soc:xiaomi_keyboard/xiaomi_keyboard_conn_status" \
+    "/sys/bus/platform/devices/soc:xiaomi_keyboard/xiaomi_keyboard_conn_status" \
+    /sys/devices/platform/soc/*xiaomi_keyboard*/xiaomi_keyboard_conn_status; do
+    if [ -f "$p" ]; then
+        NODE="$p"
+        break
+    fi
+done
+
+MODDIR="${0%/*}"
+[ "$MODDIR" = "/system/bin" ] && MODDIR="/data/adb/modules/xiaomi-keyboard-nabu-enabler"
+DPMS_NODE="/sys/class/drm/card0-DSI-1/dpms"
+
+notify_user() {
+    title="$1"
+    msg="$2"
+
+    cmd vibrator_manager synced oneshot 80 2>/dev/null || \
+    cmd vibrator_manager feedback -f 1 2>/dev/null || \
+    cmd vibrator vibrate 80 "xiaomi_kb" 2>/dev/null
+
+    cmd notification post -S bigtext -t "$title" "xiaomi_kb" "$msg" 2>/dev/null || \
+    su -lp 2000 -c "cmd notification post -S bigtext -t '$title' 'xiaomi_kb' '$msg'" 2>/dev/null
+
+    if [ -x "/data/data/com.termux/files/usr/bin/termux-toast" ]; then
+        /data/data/com.termux/files/usr/bin/termux-toast -s "$title: $msg" 2>/dev/null &
+    fi
+}
+
+bind_usbhid() {
+    if [ -f "/sys/bus/usb/devices/1-1/power/control" ]; then
+        echo "on" > "/sys/bus/usb/devices/1-1/power/control" 2>/dev/null
+        echo "-1" > "/sys/bus/usb/devices/1-1/power/autosuspend" 2>/dev/null
+    fi
+    for intf in /sys/bus/usb/devices/1-1:1.*; do
+        if [ -d "$intf" ] && [ ! -d "/sys/bus/usb/drivers/usbhid/${intf##*/}" ]; then
+            echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/bind 2>/dev/null
+        fi
+    done
+}
+
+unbind_usbhid() {
+    for intf in /sys/bus/usb/drivers/usbhid/1-1:1.*; do
+        if [ -e "$intf" ]; then
+            echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/unbind 2>/dev/null
+        fi
+    done
+}
+
+is_usb_attached() {
+    if [ -f "/sys/bus/usb/devices/1-1/idVendor" ]; then
+        read -r vid < "/sys/bus/usb/devices/1-1/idVendor" 2>/dev/null
+        [ "$vid" = "3206" ] && return 0
+    fi
+    return 1
+}
+
+ACTION="$1"
+[ -z "$ACTION" ] && ACTION="status"
+
+case "$ACTION" in
+    bind|reset|reconnect)
+        echo "=== Force Binding Keyboard Interfaces ==="
+        if [ -n "$NODE" ] && [ -f "$NODE" ]; then
+            echo "disable_keyboard" > "$NODE" 2>/dev/null
+            sleep 0.15
+            echo "enable_keyboard" > "$NODE" 2>/dev/null
+        fi
+        sleep 0.5
+        bind_usbhid
+        settings put secure show_ime_with_hard_keyboard 1 2>/dev/null
+        sleep 0.5
+        if is_usb_attached; then
+            notify_user "Keyboard Cover" "Keyboard successfully connected!"
+            echo "SUCCESS: Keyboard cover bound and ready for typing (on-screen keyboard accessible)."
+        else
+            echo "INFO: USB device 1-1 not detected on bus (cover detached)."
+        fi
+        ;;
+    notify)
+        pm grant com.android.shell android.permission.POST_NOTIFICATIONS 2>/dev/null
+        cmd appops set com.android.shell POST_NOTIFICATION allow 2>/dev/null
+        cmd appops set com.android.shell SYSTEM_ALERT_WINDOW allow 2>/dev/null
+        cmd appops set com.android.shell 10021 allow 2>/dev/null
+
+        notify_user "Keyboard Cover" "Haptic feedback and notification test succeeded!"
+        echo "[kb] Test pulse delivered (vibration + notification)."
+        ;;
+    test)
+        echo "=== 15-Second Hardware State Monitor ==="
+        echo "Detach and re-attach keyboard cover to verify auto-detection:"
+        echo ""
+        echo "Time     | Pogo-Pin | HID Binding | show_ime | Display"
+        echo "---------+----------+-------------+----------+--------"
+        for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+            raw="0"
+            [ -n "$NODE" ] && [ -f "$NODE" ] && read -r raw < "$NODE" 2>/dev/null
+            case "$raw" in 1*) pogo_st="ATTACHED" ;; *) pogo_st="DETACHED" ;; esac
+            hid_st="UNBOUND "
+            [ -d "/sys/bus/usb/drivers/usbhid/1-1:1.0" ] && hid_st="BOUND   "
+            ime=$(settings get secure show_ime_with_hard_keyboard 2>/dev/null)
+            disp="ON "
+            if [ -f "$DPMS_NODE" ]; then
+                read -r dpms_val < "$DPMS_NODE" 2>/dev/null
+                [ "$dpms_val" = "Off" ] && disp="OFF"
+            fi
+            echo "$(date '+%H:%M:%S') | $pogo_st | $hid_st     | $ime        | $disp"
+            sleep 1
+        done
+        echo "Test finished."
+        ;;
+    on|enable|1)
+        bind_usbhid
+        settings put secure show_ime_with_hard_keyboard 1 2>/dev/null
+        echo "Keyboard cover: ENABLED (on-screen keyboard accessible)"
+        notify_user "Keyboard Cover" "Keyboard enabled"
+        ;;
+    off|disable|0)
+        unbind_usbhid
+        echo "Keyboard cover: MANUALLY DISABLED (usbhid unbound, on-screen keyboard active)"
+        notify_user "Keyboard Cover" "Keyboard disabled manually"
+        ;;
+    ime_on)
+        settings put secure show_ime_with_hard_keyboard 1 2>/dev/null
+        echo "On-screen keyboard button/display: FORCED ON (show_ime=1)"
+        ;;
+    ime_off)
+        settings put secure show_ime_with_hard_keyboard 0 2>/dev/null
+        echo "On-screen keyboard button/display: FORCED OFF (show_ime=0)"
+        ;;
+    status)
+        echo "=== Xiaomi Pad Keyboard Cover Engine Status (v1.0.0 Seamless Master) ==="
+        echo "Author: xoxye"
+        echo "Pogo-pin driver node: ${NODE:-'NOT FOUND'}"
+        
+        raw="0"
+        [ -n "$NODE" ] && [ -f "$NODE" ] && read -r raw < "$NODE" 2>/dev/null
+        echo "Pogo-pin sensor (conn_status): '$raw'"
+
+        usb_pres="NOT DETECTED (bus not responding)"
+        is_usb_attached && usb_pres="DETECTED (idVendor 3206:3ffc)"
+        echo "Hardware USB bus presence: $usb_pres"
+
+        hid_st="UNBOUND (on-screen keyboard active)"
+        [ -d "/sys/bus/usb/drivers/usbhid/1-1:1.0" ] && hid_st="BOUND (physical input active in EventHub)"
+        echo "USB-HID interface binding: $hid_st"
+
+        pwr_st="N/A"
+        [ -f "/sys/bus/usb/devices/1-1/power/control" ] && read -r pwr_st < "/sys/bus/usb/devices/1-1/power/control"
+        echo "USB power management (power/control): $pwr_st"
+
+        ime_curr=$(settings get secure show_ime_with_hard_keyboard 2>/dev/null)
+        echo "On-screen keyboard setting (show_ime_with_hard_keyboard): $ime_curr (1=available)"
+
+        pid=$(pgrep -f "service.sh" | grep -v "$$" | head -n 1)
+        if [ -n "$pid" ]; then
+            echo "Background hotplug service: RUNNING (PID: $pid)"
+        else
+            echo "Background hotplug service: STOPPED"
+        fi
+        ;;
+    help|--help|-h|*)
+        echo "Usage: kb [command]"
+        echo ""
+        echo "Commands:"
+        echo "  status   - Full hardware diagnostics and daemon status (default)"
+        echo "  test     - Live 15-second hardware connection monitor"
+        echo "  bind     - Force bind keyboard USB interfaces"
+        echo "  reset    - Full power cycle and interface re-bind"
+        echo "  notify   - Test haptic vibration and system notification"
+        echo "  on       - Enable keyboard"
+        echo "  off      - Disable keyboard manually"
+        echo "  ime_on   - Enable on-screen keyboard button (show_ime=1)"
+        echo "  ime_off  - Hide on-screen keyboard (show_ime=0)"
+        ;;
+esac

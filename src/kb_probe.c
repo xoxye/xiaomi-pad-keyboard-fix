@@ -143,14 +143,12 @@ int main(int argc, char **argv) {
     }
 
     if (r >= 10) {
-        // Validate Xiaomi protocol header signature (Magic 'N' '1')
-        if (recv_buf[0] == 0x4e && recv_buf[1] == 0x31) {
-            unsigned char b9 = recv_buf[9];
-            // (recBuf[9] & 0x63) == 0x23: MIUI attached condition
-            if ((b9 & 0x63) == 0x23) {
-                printf("1\n");
-                return 0; // ATTACHED
-            }
+        // Xiaomi response header: 0x24 ('$'), 0x31 ('1')
+        unsigned char b9 = recv_buf[9];
+        // (recBuf[9] & 0x63) == 0x23: MIUI attached condition
+        if ((b9 & 0x63) == 0x23) {
+            printf("1\n");
+            return 0; // ATTACHED
         }
     }
 

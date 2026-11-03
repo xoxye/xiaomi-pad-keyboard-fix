@@ -130,18 +130,26 @@ case "$ACTION" in
         echo "=== 15-Second Hardware State Monitor ==="
         echo "Detach and re-attach keyboard cover to verify auto-detection:"
         echo ""
-        echo "Time     | Pogo-Pin | USB Bus (3206) | HID Binding | show_ime | Display"
-        echo "---------+----------+----------------+-------------+----------+--------"
+        echo "Time     | HW Probe | IRQ Node | USB-HID | show_ime | Display"
+        echo "---------+----------+----------+---------+----------+--------"
         for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
             raw="0"
             [ -n "$NODE" ] && [ -f "$NODE" ] && read -r raw < "$NODE" 2>/dev/null
-            case "$raw" in 1*) pogo_st="ATTACHED" ;; *) pogo_st="DETACHED" ;; esac
+            case "$raw" in 1*) irq_st="1" ;; *) irq_st="0" ;; esac
 
-            usb_st="DETACHED"
+            probe_st="DETACHED"
+            for pb in "$MODDIR/system/bin/kb_probe" "/system/bin/kb_probe" "/data/local/tmp/kb_probe"; do
+                if [ -x "$pb" ]; then
+                    if "$pb" >/dev/null 2>&1; then
+                        probe_st="ATTACHED"
+                    fi
+                    break
+                fi
+            done
+
             hid_st="UNBOUND "
             usb_d=$(get_usb_dev)
             if [ -n "$usb_d" ]; then
-                usb_st="ATTACHED"
                 dev_n="${usb_d##*/}"
                 [ -d "/sys/bus/usb/drivers/usbhid/${dev_n}:1.0" ] && hid_st="BOUND   "
             fi
@@ -150,7 +158,7 @@ case "$ACTION" in
             if ! is_screen_on; then
                 disp="OFF"
             fi
-            echo "$(date '+%H:%M:%S') | $pogo_st | $usb_st         | $hid_st     | $ime        | $disp"
+            echo "$(date '+%H:%M:%S') | $probe_st | $irq_st        | $hid_st | $ime        | $disp"
             sleep 1
         done
         echo "Test finished."
@@ -180,7 +188,18 @@ case "$ACTION" in
 
         raw="0"
         [ -n "$NODE" ] && [ -f "$NODE" ] && read -r raw < "$NODE" 2>/dev/null
-        echo "Pogo-pin sensor (conn_status): '$raw'"
+        echo "Pogo-pin IRQ flip-flop (conn_status): '$raw'"
+
+        probe_st="DETACHED (no contact)"
+        for pb in "$MODDIR/system/bin/kb_probe" "/system/bin/kb_probe" "/data/local/tmp/kb_probe"; do
+            if [ -x "$pb" ]; then
+                if "$pb" >/dev/null 2>&1; then
+                    probe_st="ATTACHED (pogo-pins contact verified)"
+                fi
+                break
+            fi
+        done
+        echo "Hardware bridge probe (kb_probe): $probe_st"
 
         usb_d=$(get_usb_dev)
         if [ -n "$usb_d" ]; then

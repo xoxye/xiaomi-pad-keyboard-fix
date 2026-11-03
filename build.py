@@ -11,10 +11,10 @@ def build_zip():
     print(f"Building {zip_path} from {repo_dir}...")
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
         for root, dirs, files in os.walk(repo_dir):
-            if ".git" in root.split(os.sep):
+            if ".git" in root.split(os.sep) or "src" in root.split(os.sep):
                 continue
             for f in sorted(files):
-                if f.endswith(".zip") or f in {".git", ".gitattributes", ".gitignore", "build.py"}:
+                if f.endswith(".zip") or f.endswith(".c") or f in {".git", ".gitattributes", ".gitignore", "build.py"}:
                     continue
                 abs_p = os.path.join(root, f)
                 rel_p = os.path.relpath(abs_p, repo_dir).replace("\\", "/")

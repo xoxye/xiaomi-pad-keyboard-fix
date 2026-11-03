@@ -2,6 +2,18 @@
 MODDIR=${0%/*}
 LOGFILE="$MODDIR/service.log"
 PIDFILE="/dev/xiaomi_kb.pid"
+PROBE_BIN="$MODDIR/system/bin/kb_probe"
+if [ ! -x "$PROBE_BIN" ]; then
+    for pb in "/data/adb/modules/xiaomi-keyboard-nabu-enabler/system/bin/kb_probe" \
+              "/data/adb/modules/xiaomi-pad-keyboard-fix/system/bin/kb_probe" \
+              "/system/bin/kb_probe" \
+              "/data/local/tmp/kb_probe"; do
+        if [ -x "$pb" ]; then
+            PROBE_BIN="$pb"
+            break
+        fi
+    done
+fi
 
 # Set process name for clean detection via pgrep
 echo xiaomi_kb > /proc/self/comm 2>/dev/null
@@ -57,7 +69,23 @@ get_usb_dev() {
     return 1
 }
 
-# БЕЗОПАСНАЯ ПРОВЕРКА: привязан ли именно интерфейс клавиатуры Xiaomi VID 3206
+# АППАРАТНАЯ ПРОВЕРКА ПОДКЛЮЧЕНИЯ ЧЕХЛА (Hardware Direct Query):
+# Опрашивает USB-мост (VID 3206) через вендорный протокол Xiaomi (Interface 2, commandGetConnectState).
+# Возвращает 0 если чехол физически соединен с pogo-пинами, 1 если отключен.
+check_hardware_attached() {
+    if [ -x "$PROBE_BIN" ]; then
+        "$PROBE_BIN" >/dev/null 2>&1
+        return $?
+    fi
+    # Fallback на системную ноду, если бинарник недоступен
+    if [ -n "$NODE" ] && [ -f "$NODE" ]; then
+        read -r raw < "$NODE" 2>/dev/null
+        case "$raw" in 1*) return 0 ;; *) return 1 ;; esac
+    fi
+    return 1
+}
+
+# БЕЗОПАСНАЯ ПРОВЕРКА: привязан ли интерфейс клавиатуры Xiaomi VID 3206
 is_kb_bound() {
     [ -z "$CACHED_USB_DEV" ] && CACHED_USB_DEV=$(get_usb_dev)
     if [ -n "$CACHED_USB_DEV" ]; then
@@ -77,7 +105,7 @@ is_kb_bound() {
     return 1
 }
 
-# БЕЗОПАСНЫЙ BIND: включает питание и вяжет ТОЛЬКО интерфейсы Xiaomi VID 3206
+# БЕЗОПАСНЫЙ BIND: включает питание и вяжет ТОЛЬКО интерфейсы Xiaomi VID 3206 (кроме 1.2)
 bind_keyboard() {
     CACHED_USB_DEV=$(get_usb_dev)
     if [ -n "$CACHED_USB_DEV" ]; then
@@ -87,6 +115,9 @@ bind_keyboard() {
         fi
         dev_name="${CACHED_USB_DEV##*/}"
         for intf in /sys/bus/usb/devices/${dev_name}:1.*; do
+            case "$intf" in
+                *:1.2) continue ;; # Interface 2 reserved for kb_probe hardware protocol
+            esac
             if [ -d "$intf" ] && [ ! -d "/sys/bus/usb/drivers/usbhid/${intf##*/}" ]; then
                 echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/bind 2>/dev/null
             fi
@@ -135,41 +166,39 @@ is_screen_on() {
 }
 
 NODE=$(find_node)
-CACHED_USB_DEV=$(get_usb_dev)
+
+# Wait up to 3 seconds for USB device to enumerate if early boot
+for w in 1 2 3 4 5 6; do
+    CACHED_USB_DEV=$(get_usb_dev)
+    [ -n "$CACHED_USB_DEV" ] && break
+    sleep 0.5
+done
+
 log_msg "Xiaomi Pad Keyboard Engine daemon started (PID: $$)"
+log_msg "Probe binary: $PROBE_BIN (executable: $([ -x "$PROBE_BIN" ] && echo YES || echo NO))"
 
-# --- 2. STARTUP & COLD BOOT SYNCHRONIZATION ---
-# В ядре Xiaomi драйвер soc:xiaomi_keyboard при старте питания производит импульсы,
-# оставляющие conn_status = 0 при холодной загрузке.
-# Если USB-мост VID 3206 присутствует, мы сразу привязываем клавиатуру,
-# обеспечивая мгновенную доступность ввода на экране блокировки.
-
-raw="0"
-if [ -n "$NODE" ] && [ -f "$NODE" ]; then
-    read -r raw < "$NODE" 2>/dev/null
-    case "$raw" in 1*) raw="1" ;; *) raw="0" ;; esac
-fi
-
-# На старте всегда связываем для готовности экрана блокировки
-if [ -n "$CACHED_USB_DEV" ]; then
+# --- 2. STARTUP HARDWARE INITIALIZATION ---
+# Прямой аппаратный опрос контроллера чехла:
+# Безошибочно определяет наличие чехла даже при холодной загрузке!
+if check_hardware_attached; then
     bind_keyboard
     IS_BOUND=1
-    log_msg "Startup: Physical keyboard present (VID 3206, sensor=$raw) -> bound, ready for lockscreen"
+    log_msg "Startup: Keyboard cover physically ATTACHED -> bound, ready for lockscreen"
 else
     unbind_keyboard
     IS_BOUND=0
-    log_msg "Startup: Keyboard not present -> idle, on-screen keyboard active"
+    log_msg "Startup: Keyboard cover NOT attached -> unbound, on-screen keyboard active"
 fi
 
-# Режим защиты ранней загрузки (Boot Immunity Window):
-# Предотвращает ложный unbind на первых секундах до завершения старта системы
-boot_immune=1
-boot_start_time=$(date +%s 2>/dev/null || echo 0)
+LAST_RAW="0"
+if [ -n "$NODE" ] && [ -f "$NODE" ]; then
+    read -r LAST_RAW < "$NODE" 2>/dev/null
+    case "$LAST_RAW" in 1*) LAST_RAW="1" ;; *) LAST_RAW="0" ;; esac
+fi
 
-LAST_STABLE_RAW="$raw"
-PENDING_RAW="$raw"
-DEBOUNCE_COUNT=0
 unlock_done=0
+tick=0
+last_screen_state=1
 
 while true; do
     # Синхронизация после завершения загрузки системы
@@ -182,60 +211,59 @@ while true; do
         fi
     fi
 
-    # Снятие иммунитета загрузки через 10 секунд после старта демона или при явном sensor=1
-    if [ "$boot_immune" -eq 1 ]; then
-        now_time=$(date +%s 2>/dev/null || echo 0)
-        elapsed=$((now_time - boot_start_time))
-        if [ "$elapsed" -ge 10 ] || [ "$raw" = "1" ]; then
-            boot_immune=0
-            log_msg "Boot Immunity expired (elapsed=${elapsed}s, sensor=$raw), active management enabled"
-        fi
+    screen_now=0
+    if is_screen_on; then
+        screen_now=1
     fi
 
-    # Считывание сырого состояния сенсора pogo-pin
+    # Считывание сырого состояния прерывания ядра
     current_raw="0"
     if [ -n "$NODE" ] && [ -f "$NODE" ]; then
         read -r current_raw < "$NODE" 2>/dev/null
         case "$current_raw" in 1*) current_raw="1" ;; *) current_raw="0" ;; esac
     fi
 
-    # Фильтрация дребезга контактов (Debounce Filter: 2 последовательных тика по 0.25с = 0.5с)
-    if [ "$current_raw" != "$LAST_STABLE_RAW" ]; then
-        if [ "$current_raw" = "$PENDING_RAW" ]; then
-            DEBOUNCE_COUNT=$((DEBOUNCE_COUNT + 1))
-            if [ "$DEBOUNCE_COUNT" -ge 2 ]; then
-                LAST_STABLE_RAW="$current_raw"
-                DEBOUNCE_COUNT=0
+    tick=$((tick + 1))
+    need_check=0
 
-                # АБСОЛЮТНАЯ ПРЯМАЯ ЛОГИКА (БЕЗ ТРИГГЕРОВ / ИНВЕРСИЙ):
-                # 1 = ФИЗИЧЕСКИ ПОДКЛЮЧЕН -> ВСЕГДА BIND!
-                # 0 = ФИЗИЧЕСКИ ОТКЛЮЧЕН -> ВСЕГДА UNBIND!
-                if [ "$LAST_STABLE_RAW" = "1" ]; then
-                    if [ "$IS_BOUND" -eq 0 ]; then
-                        bind_keyboard
-                        IS_BOUND=1
-                        log_msg "TRANSITION: ATTACHED (sensor=1) -> bound, physical keyboard active"
-                        notify_user "Keyboard Cover" "Keyboard connected"
-                    fi
-                else
-                    if [ "$boot_immune" -eq 0 ] && [ "$IS_BOUND" -eq 1 ]; then
-                        unbind_keyboard
-                        IS_BOUND=0
-                        log_msg "TRANSITION: DETACHED (sensor=0) -> unbound, on-screen keyboard active"
-                        notify_user "Keyboard Cover" "Keyboard disconnected"
-                    fi
-                fi
+    # Триггер 1: произошло аппаратное прерывание на шине (изменение conn_status)
+    if [ "$current_raw" != "$LAST_RAW" ]; then
+        need_check=1
+        LAST_RAW="$current_raw"
+    # Триггер 2: экран включился
+    elif [ "$screen_now" -eq 1 ] && [ "$last_screen_state" -eq 0 ]; then
+        need_check=1
+    # Триггер 3: периодический heartbeat (каждые 2 сек при вкл. экране, 6 сек при выкл.)
+    elif [ "$screen_now" -eq 1 ] && [ "$tick" -ge 8 ]; then
+        need_check=1
+        tick=0
+    elif [ "$screen_now" -eq 0 ] && [ "$tick" -ge 2 ]; then
+        need_check=1
+        tick=0
+    fi
+    last_screen_state="$screen_now"
+
+    if [ "$need_check" -eq 1 ]; then
+        if check_hardware_attached; then
+            # Чехол физически подключен к pogo-пинам
+            if [ "$IS_BOUND" -eq 0 ] || ! is_kb_bound; then
+                bind_keyboard
+                IS_BOUND=1
+                log_msg "TRANSITION: ATTACHED (hardware probe confirmed) -> bound, physical keyboard active"
+                notify_user "Keyboard Cover" "Keyboard connected"
             fi
         else
-            PENDING_RAW="$current_raw"
-            DEBOUNCE_COUNT=1
+            # Чехол физически отсоединен от pogo-пинов
+            if [ "$IS_BOUND" -eq 1 ] || is_kb_bound; then
+                unbind_keyboard
+                IS_BOUND=0
+                log_msg "TRANSITION: DETACHED (hardware probe confirmed) -> unbound, on-screen keyboard active"
+                notify_user "Keyboard Cover" "Keyboard disconnected"
+            fi
         fi
-    else
-        PENDING_RAW="$current_raw"
-        DEBOUNCE_COUNT=0
     fi
 
-    if is_screen_on; then
+    if [ "$screen_now" -eq 1 ]; then
         sleep 0.25
     else
         sleep 3.0

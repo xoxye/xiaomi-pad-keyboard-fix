@@ -57,7 +57,7 @@ get_usb_dev() {
     return 1
 }
 
-# БЕЗОПАСНАЯ ПРОВЕРКА: привязан ли именно интерфейс клавиатуры Xiaomi
+# БЕЗОПАСНАЯ ПРОВЕРКА: привязан ли именно интерфейс клавиатуры Xiaomi VID 3206
 is_kb_bound() {
     [ -z "$CACHED_USB_DEV" ] && CACHED_USB_DEV=$(get_usb_dev)
     if [ -n "$CACHED_USB_DEV" ]; then
@@ -77,7 +77,7 @@ is_kb_bound() {
     return 1
 }
 
-# БЕЗОПАСНЫЙ BIND: включает питание и вяжет только свои интерфейсы
+# БЕЗОПАСНЫЙ BIND: включает питание и вяжет только интерфейсы Xiaomi VID 3206
 bind_keyboard() {
     CACHED_USB_DEV=$(get_usb_dev)
     if [ -n "$CACHED_USB_DEV" ]; then
@@ -102,7 +102,6 @@ unbind_keyboard() {
             [ -e "$intf" ] && echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/unbind 2>/dev/null
         done
     else
-        # Запасной поиск: отвязываем только интерфейсы, у которых родительский vid == 3206
         for intf in /sys/bus/usb/drivers/usbhid/*:1.*; do
             if [ -e "$intf" ]; then
                 real_p=$(readlink -f "$intf" 2>/dev/null)
@@ -137,10 +136,16 @@ is_screen_on() {
 }
 
 NODE=$(find_node)
+
+# Pre-flight sync: ensure driver node is enabled if keyboard is present
+if [ -n "$NODE" ] && [ -f "$NODE" ]; then
+    echo "enable_keyboard" > "$NODE" 2>/dev/null
+fi
+
 CACHED_USB_DEV=$(get_usb_dev)
 log_msg "Xiaomi Pad Keyboard Engine daemon started (PID: $$)"
 
-# Первоначальная инициализация при загрузке
+# Initial boot state: if keyboard is physically present on USB, keep it bound!
 if [ -n "$CACHED_USB_DEV" ]; then
     bind_keyboard
     log_msg "Boot: Physical keyboard detected (VID 3206) -> bound"
@@ -154,7 +159,7 @@ one_ticks=0
 unlock_done=0
 
 while true; do
-    # Однократная синхронизация после разблокировки экрана
+    # Однократная синхронизация после завершения загрузки
     if [ "$unlock_done" -eq 0 ]; then
         if [ "$(getprop sys.boot_completed)" = "1" ] || [ "$(getprop dev.bootcomplete)" = "1" ]; then
             unlock_done=1
@@ -164,33 +169,47 @@ while true; do
         fi
     fi
 
-    # Считывание статуса с сенсора pogo-pin
+    # 1. Чтение статуса с сенсора pogo-pin
     raw="0"
     if [ -n "$NODE" ] && [ -f "$NODE" ]; then
         read -r raw < "$NODE" 2>/dev/null
         case "$raw" in 1*) raw="1" ;; *) raw="0" ;; esac
     fi
 
-    if [ "$raw" = "1" ]; then
+    # 2. Быстрая проверка присутствия USB-устройства на шине (O(1) stat)
+    usb_online=0
+    if [ -n "$CACHED_USB_DEV" ] && [ -f "$CACHED_USB_DEV/idVendor" ]; then
+        usb_online=1
+    else
+        CACHED_USB_DEV=$(get_usb_dev)
+        [ -n "$CACHED_USB_DEV" ] && usb_online=1
+    fi
+
+    # УСЛОВИЕ ПОДКЛЮЧЕНИЯ:
+    # Чехол подключен, если сенсор сообщает 1 ИЛИ устройство присутствует на USB-шине!
+    # Это полностью предотвращает ложное отключение на холодном старте (Cold Boot).
+    if [ "$raw" = "1" ] || [ "$usb_online" -eq 1 ]; then
         zero_ticks=0
         if ! is_kb_bound; then
             one_ticks=$((one_ticks + 1))
             if [ "$one_ticks" -ge 1 ]; then
                 bind_keyboard
-                log_msg "TRANSITION: ATTACHED -> bound, physical keyboard active"
+                log_msg "TRANSITION: ATTACHED (pogo=$raw, usb=$usb_online) -> bound, physical keyboard active"
                 notify_user "Keyboard Cover" "Keyboard connected"
             fi
         else
             one_ticks=0
         fi
     else
+        # УСЛОВИЕ ОТКЛЮЧЕНИЯ:
+        # Чехол физически отсоединён (сенсор 0 И устройство физически исчезло с шины USB)
         one_ticks=0
         if is_kb_bound; then
             zero_ticks=$((zero_ticks + 1))
-            # Дебаунс 0.5с для исключения дребезга контактов магнита
+            # Дебаунс 0.5с (2 тика) для фильтрации механического дребезга
             if [ "$zero_ticks" -ge 2 ]; then
                 unbind_keyboard
-                log_msg "TRANSITION: DETACHED -> unbound, on-screen keyboard active"
+                log_msg "TRANSITION: DETACHED (pogo=$raw, usb=$usb_online) -> unbound, on-screen keyboard active"
                 notify_user "Keyboard Cover" "Keyboard disconnected"
             fi
         else

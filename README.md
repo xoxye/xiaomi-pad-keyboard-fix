@@ -6,9 +6,17 @@
 [![Android](https://img.shields.io/badge/Android-11%20--%2015-success.svg)](https://android.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A lightweight, kernel-integrated Magisk / KernelSU / APatch module that fixes magnetic pogo-pin official keyboard covers on Xiaomi Pad tablets running HyperOS, MIUI, or AOSP-based custom ROMs (Android 11 through Android 15).
+A lightweight, kernel-integrated Magisk / KernelSU / APatch module that fixes magnetic pogo-pin official keyboard covers on Xiaomi Pad tablets.
 
 Developed by **xoxye**.
+
+> [!IMPORTANT]
+> ### 🎯 Target Environment & Primary Purpose
+> - **Tested Device & ROM:** **Xiaomi Pad 5 Pro (`elish`)** running ported **HyperOS `2.0.211.0.VKYCNXM`**.
+> - **Problem Addressed:** On this ported firmware, the official Xiaomi keyboard cover **is not supported out of the box** (completely non-functional). This module was primarily engineered to eliminate this blocker and restore full native typing and hotplug capabilities.
+> - **Other Devices / ROMs:** **Untested**. While architecture and driver nodes are similar across the Pad 5/6 family, compatibility on other models and ROMs has not yet been verified.
+>
+> *(RU) Модуль разработан и проверен на **Xiaomi Pad 5 Pro (`elish`)** под управлением **портированной прошивки HyperOS 2.0.211.0.VKYCNXM**, где родная клавиатура не поддерживается «из коробки». На остальных устройствах и прошивках работа пока не проверялась.*
 
 ---
 
@@ -30,15 +38,15 @@ Developed by **xoxye**.
 
 ## 📱 Supported Devices
 
-| Device Codename | Commercial Name | Chipset |
-| :--- | :--- | :--- |
-| `nabu` | Xiaomi Pad 5 | Snapdragon 860 |
-| `elish` | Xiaomi Pad 5 Pro (Wi-Fi) | Snapdragon 870 |
-| `enuma` | Xiaomi Pad 5 Pro 5G | Snapdragon 870 |
-| `dagu` | Xiaomi Pad 5 Pro 12.4 | Snapdragon 870 |
-| `pipa` | Xiaomi Pad 6 | Snapdragon 870 |
-| `liuqin` | Xiaomi Pad 6 Pro | Snapdragon 8+ Gen 1 |
-| `yudi` | Xiaomi Pad 6 Max 14 | Snapdragon 8+ Gen 1 |
+| Device Codename | Commercial Name | Chipset | Verification Status |
+| :--- | :--- | :--- | :--- |
+| `elish` | Xiaomi Pad 5 Pro (Wi-Fi) | Snapdragon 870 | **Verified & Tested** (Ported HyperOS `2.0.211.0.VKYCNXM`) |
+| `nabu` | Xiaomi Pad 5 | Snapdragon 860 | Experimental (Hardware logic supported, untested) |
+| `enuma` | Xiaomi Pad 5 Pro 5G | Snapdragon 870 | Experimental (Hardware logic supported, untested) |
+| `dagu` | Xiaomi Pad 5 Pro 12.4 | Snapdragon 870 | Experimental (Hardware logic supported, untested) |
+| `pipa` | Xiaomi Pad 6 | Snapdragon 870 | Experimental (Hardware logic supported, untested) |
+| `liuqin` | Xiaomi Pad 6 Pro | Snapdragon 8+ Gen 1 | Experimental (Hardware logic supported, untested) |
+| `yudi` | Xiaomi Pad 6 Max 14 | Snapdragon 8+ Gen 1 | Experimental (Hardware logic supported, untested) |
 
 ---
 

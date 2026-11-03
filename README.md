@@ -30,7 +30,7 @@ Developed by **xoxye**.
 - **Zero Hardware Dropouts:** Locks USB power management into persistent `on` mode with autosuspend disabled (`-1`), preventing MCU sleep during inactivity or typing pauses.
 - **Adaptive Screen-Off Power Management:** 
   - Screen ON: polls every `0.25s` for instant detach response.
-  - Screen OFF: dynamically backs off to `1.5s` with dual Backlight + DRM DPMS detection to preserve battery and allow the device to enter uninterrupted **Deep Sleep** while ensuring sub-second response when unlocking.
+  - Screen OFF: dynamically backs off to `3s` with dual Backlight + DRM DPMS detection to preserve battery and allow the device to enter uninterrupted **Deep Sleep** while ensuring sub-second response when unlocking.
 - **Ultra-Lightweight (Zero-Fork Architecture):** Uses native POSIX shell built-ins with zero child process overhead (`0.2% CPU of 1 core`, `< 800 KB RAM`).
 - **CLI Management Tool (`kb`):** Full diagnostic suite, live connection testing, and manual override directly from terminal.
 
@@ -76,9 +76,10 @@ su -c kb status
 | `kb test` | Live 15-second hardware connection monitor displaying pin states and display mode |
 | `kb bind` | Force software re-bind of keyboard USB interfaces |
 | `kb reset` | Full power cycle pulse and interface re-enumeration |
-| `kb notify` | Test haptic vibration pulse and system notification banner |
-| `kb on` | Enable keyboard driver |
-| `kb off` | Manually unbind keyboard driver (forces on-screen keyboard) |
+| `kb notify` | Test haptic vibration pulse and on-screen Toast popup (fade in/out) |
+| `kb quiet` | Toggle or set silent mode (`kb quiet on` / `kb quiet off`), muting alerts & vibration |
+| `kb on` | Enable keyboard driver and resume auto-hotplug |
+| `kb off` | Manually unbind keyboard driver (forces on-screen keyboard, persistent until `kb on`) |
 | `kb ime_on` | Force show on-screen keyboard even when physical keyboard is connected |
 | `kb ime_off` | Hide on-screen keyboard when physical keyboard is connected |
 

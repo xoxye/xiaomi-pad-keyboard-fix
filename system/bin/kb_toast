@@ -1,0 +1,14 @@
+#!/system/bin/sh
+# Native Android Toast trigger (center-bottom popup)
+MSG="${1:-Xiaomi Pad Keyboard}"
+for d in \
+    "/system/framework/xiaomi_kb_toast.jar" \
+    "$(dirname "$(readlink -f "$0")")/../framework/xiaomi_kb_toast.jar" \
+    "/data/adb/modules/xiaomi-keyboard-nabu-enabler/toast.dex" \
+    "/data/adb/modules/magisk-xiaomi-keyboard-fix/toast.dex" \
+    "/data/local/tmp/toast.dex"; do
+    if [ -f "$d" ]; then
+        CLASSPATH="$d" app_process / toast.Main "$MSG" >/dev/null 2>&1
+        exit 0
+    fi
+done

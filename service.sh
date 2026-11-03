@@ -37,12 +37,50 @@ log_msg() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOGFILE"
 }
 
+show_toast() {
+    msg="$1"
+    (
+        for d in \
+            "$MODDIR/toast.dex" \
+            "/system/framework/xiaomi_kb_toast.jar" \
+            "$MODDIR/system/framework/xiaomi_kb_toast.jar" \
+            "/data/adb/modules/xiaomi-keyboard-nabu-enabler/toast.dex" \
+            "/data/local/tmp/toast.dex"; do
+            if [ -f "$d" ]; then
+                CLASSPATH="$d" app_process / toast.Main "$msg" >/dev/null 2>&1
+                return 0
+            fi
+        done
+    ) &
+}
+
 notify_user() {
-    title="$1"
-    msg="$2"
-    cmd vibrator_manager synced oneshot 80 2>/dev/null || \
-    cmd vibrator vibrate 80 "xiaomi_kb" 2>/dev/null
-    cmd notification post -S bigtext -t "$title" "xiaomi_kb" "$msg" 2>/dev/null
+    [ -f "/dev/xiaomi_kb_quiet" ] && return 0
+    [ -f "$MODDIR/disable_notifications" ] && return 0
+    msg="$1"
+    cmd vibrator_manager synced oneshot 60 2>/dev/null || \
+    cmd vibrator vibrate 60 "xiaomi_kb" 2>/dev/null
+    show_toast "$msg"
+}
+
+get_msg() {
+    loc=$(getprop persist.sys.locale 2>/dev/null)
+    case "$loc" in
+        ru*)
+            case "$1" in
+                connected) echo "Клавиатура подключена" ;;
+                disconnected) echo "Клавиатура отключена" ;;
+                *) echo "$1" ;;
+            esac
+            ;;
+        *)
+            case "$1" in
+                connected) echo "Keyboard connected" ;;
+                disconnected) echo "Keyboard disconnected" ;;
+                *) echo "$1" ;;
+            esac
+            ;;
+    esac
 }
 
 find_node() {
@@ -218,12 +256,25 @@ last_screen_state=1
 last_notify_time=0
 
 while true; do
+    # Проверка ручного отключения клавиатуры пользователем (kb off)
+    if [ -f "/dev/xiaomi_kb_disabled" ]; then
+        if [ "$IS_BOUND" -eq 1 ] || is_kb_bound; then
+            unbind_keyboard
+            IS_BOUND=0
+            log_msg "Manual override active (/dev/xiaomi_kb_disabled) -> keyboard unbound"
+        fi
+        if is_screen_on; then
+            sleep 0.5
+        else
+            sleep 3
+        fi
+        continue
+    fi
+
     # Синхронизация после завершения загрузки системы
     if [ "$unlock_done" -eq 0 ]; then
         if [ "$(getprop sys.boot_completed)" = "1" ] || [ "$(getprop dev.bootcomplete)" = "1" ]; then
             unlock_done=1
-            pm grant com.android.shell android.permission.POST_NOTIFICATIONS 2>/dev/null
-            cmd appops set com.android.shell POST_NOTIFICATION allow 2>/dev/null
             log_msg "Post-Unlock: boot completed, subsystem ready"
         fi
     fi
@@ -254,8 +305,8 @@ while true; do
         if [ "$IS_BOUND" -eq 1 ] && [ -n "$CACHED_USB_DEV" ] && [ -f "$CACHED_USB_DEV/power/control" ]; then
             echo "on" > "$CACHED_USB_DEV/power/control" 2>/dev/null
         fi
-    # Триггер 3: периодический heartbeat (только при включенном экране каждые 2 сек)
-    elif [ "$screen_now" -eq 1 ] && [ "$tick" -ge 8 ]; then
+    # Триггер 3: периодический heartbeat (только при включенном экране каждые 4 сек)
+    elif [ "$screen_now" -eq 1 ] && [ "$tick" -ge 16 ]; then
         need_check=1
         tick=0
     fi
@@ -271,7 +322,7 @@ while true; do
                 now_s=$(date +%s 2>/dev/null || echo 0)
                 if [ $((now_s - last_notify_time)) -ge 2 ]; then
                     last_notify_time=$now_s
-                    (notify_user "Keyboard Cover" "Keyboard connected") &
+                    notify_user "$(get_msg connected)"
                 fi
             fi
         else
@@ -283,7 +334,7 @@ while true; do
                 now_s=$(date +%s 2>/dev/null || echo 0)
                 if [ $((now_s - last_notify_time)) -ge 2 ]; then
                     last_notify_time=$now_s
-                    (notify_user "Keyboard Cover" "Keyboard disconnected") &
+                    notify_user "$(get_msg disconnected)"
                 fi
             fi
         fi
@@ -292,8 +343,7 @@ while true; do
     if [ "$screen_now" -eq 1 ]; then
         sleep 0.25
     else
-        # При выключенном экране спим короткими тактами (1.5 сек):
-        # нулевая нагрузка на CPU, но быстрый отклик на включение экрана
-        sleep 1.5
+        # При выключенном экране спим тактами по 3 сек для поддержки глубокого сна (Deep Sleep)
+        sleep 3
     fi
 done

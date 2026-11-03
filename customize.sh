@@ -3,6 +3,12 @@ ui_print "   Xiaomi Pad Keyboard Engine (v1.1)"
 ui_print "             Author: xoxye"
 ui_print "**********************************************"
 
+if [ "$ARCH" != "arm64" ]; then
+    ui_print "! Error: Unsupported CPU architecture '$ARCH'."
+    ui_print "! This hardware driver module requires 64-bit ARM (arm64)."
+    abort
+fi
+
 DEVICE=$(getprop ro.product.device)
 VENDOR_DEV=$(getprop ro.product.vendor.device)
 [ -z "$VENDOR_DEV" ] && VENDOR_DEV=$(getprop ro.vendor.product.device)
@@ -43,7 +49,7 @@ ui_print "- Seamless Hotplug & Instant On-Screen Keyboard on Detach: ACTIVE"
 ui_print "- Continuous Pogo-Pin Hardware Power: ACTIVE"
 ui_print "- Instant Dynamic USB-HID Auto-Binding on Attach: ACTIVE"
 ui_print "- Continuous USB Hardware Link (Zero Dropouts): ACTIVE"
-ui_print "- Screen-Off Responsive Sleep (1.5s interval with Deep Sleep): ACTIVE"
+ui_print "- Screen-Off Responsive Sleep (3s interval with Deep Sleep): ACTIVE"
 ui_print "- Safe Process Management (Dedicated PID): ACTIVE"
 
 # Create symlink for xiaomi-keyboard to eliminate duplicate binary (DRY)
@@ -51,10 +57,13 @@ ui_print "- Safe Process Management (Dedicated PID): ACTIVE"
 ln -sf kb "$MODPATH/system/bin/xiaomi-keyboard"
 
 set_perm_recursive "$MODPATH/system/bin" 0 0 0755 0755
+[ -d "$MODPATH/system/framework" ] && set_perm_recursive "$MODPATH/system/framework" 0 0 0755 0644
 set_perm "$MODPATH/post-fs-data.sh" 0 0 0755
 set_perm "$MODPATH/service.sh" 0 0 0755
 set_perm "$MODPATH/system/bin/kb" 0 0 0755
 set_perm "$MODPATH/system/bin/kb_probe" 0 0 0755
+[ -f "$MODPATH/system/bin/kb_toast" ] && set_perm "$MODPATH/system/bin/kb_toast" 0 0 0755
+[ -f "$MODPATH/toast.dex" ] && set_perm "$MODPATH/toast.dex" 0 0 0644
 [ -f "$MODPATH/test_cycle.sh" ] && set_perm "$MODPATH/test_cycle.sh" 0 0 0755
 
 # Ensure system_file SELinux label on strict Enforcing kernels

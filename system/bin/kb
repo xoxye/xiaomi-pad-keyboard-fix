@@ -3,6 +3,11 @@
 # Author: xoxye
 # Supports: status, test, bind, reset, notify, ime_on, ime_off, on, off
 
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Error: Root required. Please run: su -c kb $@"
+    exit 1
+fi
+
 NODE=""
 for p in \
     "/sys/bus/platform/drivers/xiaomi-keyboard/soc:xiaomi_keyboard/xiaomi_keyboard_conn_status" \
@@ -117,12 +122,55 @@ is_screen_on() {
     return 0
 }
 
+show_toast() {
+    msg="$1"
+    for d in \
+        "/system/framework/xiaomi_kb_toast.jar" \
+        "$MODDIR/../framework/xiaomi_kb_toast.jar" \
+        "$MODDIR/toast.dex" \
+        "/data/adb/modules/xiaomi-keyboard-nabu-enabler/toast.dex" \
+        "/data/adb/modules/magisk-xiaomi-keyboard-fix/toast.dex" \
+        "/data/local/tmp/toast.dex"; do
+        if [ -f "$d" ]; then
+            CLASSPATH="$d" app_process / toast.Main "$msg" >/dev/null 2>&1
+            return 0
+        fi
+    done
+}
+
 notify_user() {
-    title="$1"
-    msg="$2"
-    cmd vibrator_manager synced oneshot 80 2>/dev/null || \
-    cmd vibrator vibrate 80 "xiaomi_kb" 2>/dev/null
-    cmd notification post -S bigtext -t "$title" "xiaomi_kb" "$msg" 2>/dev/null
+    [ -f "/dev/xiaomi_kb_quiet" ] && return 0
+    [ -f "$MODDIR/disable_notifications" ] && return 0
+    msg="$1"
+    cmd vibrator_manager synced oneshot 60 2>/dev/null || \
+    cmd vibrator vibrate 60 "xiaomi_kb" 2>/dev/null
+    show_toast "$msg"
+}
+
+get_msg() {
+    loc=$(getprop persist.sys.locale 2>/dev/null)
+    case "$loc" in
+        ru*)
+            case "$1" in
+                connected) echo "Клавиатура подключена" ;;
+                disconnected) echo "Клавиатура отключена" ;;
+                enabled) echo "Клавиатура включена" ;;
+                disabled) echo "Клавиатура отключена вручную" ;;
+                test) echo "Тест всплывающего уведомления" ;;
+                *) echo "$1" ;;
+            esac
+            ;;
+        *)
+            case "$1" in
+                connected) echo "Keyboard connected" ;;
+                disconnected) echo "Keyboard disconnected" ;;
+                enabled) echo "Keyboard enabled" ;;
+                disabled) echo "Keyboard disabled manually" ;;
+                test) echo "Toast notification test" ;;
+                *) echo "$1" ;;
+            esac
+            ;;
+    esac
 }
 
 ACTION="$1"
@@ -130,6 +178,7 @@ ACTION="$1"
 
 case "$ACTION" in
     bind|reset|reconnect)
+        rm -f /dev/xiaomi_kb_disabled 2>/dev/null
         echo "=== Force Binding Keyboard Interfaces ==="
         if [ -n "$NODE" ] && [ -f "$NODE" ]; then
             echo "enable_keyboard" > "$NODE" 2>/dev/null
@@ -138,18 +187,36 @@ case "$ACTION" in
         bind_usbhid
         sleep 0.2
         if is_usb_attached; then
-            notify_user "Keyboard Cover" "Keyboard successfully connected!"
+            notify_user "$(get_msg connected)"
             echo "SUCCESS: Keyboard cover bound and ready for typing."
         else
             echo "INFO: USB device with vendor 3206 not detected on bus (cover detached)."
         fi
         ;;
-    notify)
-        pm grant com.android.shell android.permission.POST_NOTIFICATIONS 2>/dev/null
-        cmd appops set com.android.shell POST_NOTIFICATION allow 2>/dev/null
-
-        notify_user "Keyboard Cover" "Haptic feedback and notification test succeeded!"
-        echo "[kb] Test pulse delivered (vibration + notification)."
+    notify|toast)
+        # Test pulse ignores quiet mode
+        cmd vibrator_manager synced oneshot 60 2>/dev/null || \
+        cmd vibrator vibrate 60 "xiaomi_kb" 2>/dev/null
+        show_toast "$(get_msg test)"
+        echo "[kb] Toast popup displayed on screen."
+        ;;
+    quiet|silent)
+        target_f="$MODDIR/disable_notifications"
+        if [ "$2" = "off" ] || [ "$2" = "0" ]; then
+            rm -f "$target_f" /dev/xiaomi_kb_quiet 2>/dev/null
+            echo "Notifications: ENABLED"
+        elif [ "$2" = "on" ] || [ "$2" = "1" ]; then
+            touch "$target_f" 2>/dev/null || touch /dev/xiaomi_kb_quiet 2>/dev/null
+            echo "Notifications: MUTED (quiet mode active)"
+        else
+            if [ -f "$target_f" ] || [ -f "/dev/xiaomi_kb_quiet" ]; then
+                rm -f "$target_f" /dev/xiaomi_kb_quiet 2>/dev/null
+                echo "Notifications: ENABLED (unmuted)"
+            else
+                touch "$target_f" 2>/dev/null || touch /dev/xiaomi_kb_quiet 2>/dev/null
+                echo "Notifications: MUTED (quiet mode active)"
+            fi
+        fi
         ;;
     test)
         echo "=== 15-Second Hardware State Monitor ==="
@@ -191,14 +258,16 @@ case "$ACTION" in
         echo "Test finished."
         ;;
     on|enable|1)
+        rm -f /dev/xiaomi_kb_disabled 2>/dev/null
         bind_usbhid
-        echo "Keyboard cover: ENABLED (interfaces bound)"
-        notify_user "Keyboard Cover" "Keyboard enabled"
+        echo "Keyboard cover: ENABLED (auto-hotplug resumed)"
+        notify_user "$(get_msg enabled)"
         ;;
     off|disable|0)
+        touch /dev/xiaomi_kb_disabled 2>/dev/null
         unbind_usbhid
-        echo "Keyboard cover: MANUALLY DISABLED (usbhid unbound, on-screen keyboard active)"
-        notify_user "Keyboard Cover" "Keyboard disabled manually"
+        echo "Keyboard cover: MANUALLY DISABLED (persistent until 'kb on', on-screen keyboard active)"
+        notify_user "$(get_msg disabled)"
         ;;
     ime_on)
         settings put secure show_ime_with_hard_keyboard 1 2>/dev/null
@@ -248,6 +317,18 @@ case "$ACTION" in
         ime_curr=$(settings get secure show_ime_with_hard_keyboard 2>/dev/null)
         echo "On-screen keyboard setting (show_ime_with_hard_keyboard): $ime_curr"
 
+        if [ -f "/dev/xiaomi_kb_disabled" ]; then
+            echo "Manual override mode: DISABLED by user (/dev/xiaomi_kb_disabled)"
+        else
+            echo "Manual override mode: AUTO (normal operation)"
+        fi
+
+        if [ -f "$MODDIR/disable_notifications" ] || [ -f "/dev/xiaomi_kb_quiet" ]; then
+            echo "Toast popups / Haptic alerts: MUTED (quiet mode)"
+        else
+            echo "Toast popups / Haptic alerts: ENABLED"
+        fi
+
         pid=""
         for pf in /dev/xiaomi_kb.pid /dev/run/xiaomi_kb.pid "$MODDIR/daemon.pid"; do
             if [ -f "$pf" ]; then
@@ -279,9 +360,10 @@ case "$ACTION" in
         echo "  test     - Live 15-second hardware connection monitor"
         echo "  bind     - Force bind keyboard USB interfaces"
         echo "  reset    - Full power cycle and interface re-bind"
-        echo "  notify   - Test haptic vibration and system notification"
-        echo "  on       - Enable keyboard"
-        echo "  off      - Disable keyboard manually"
+        echo "  notify   - Test Toast popup and haptic vibration"
+        echo "  quiet    - Toggle or set silent mode (mute notifications & vibration)"
+        echo "  on       - Enable keyboard and resume auto-hotplug"
+        echo "  off      - Disable keyboard manually (persistent until 'kb on')"
         echo "  ime_on   - Enable on-screen keyboard button (show_ime=1)"
         echo "  ime_off  - Hide on-screen keyboard (show_ime=0)"
         ;;

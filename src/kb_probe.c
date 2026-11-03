@@ -30,11 +30,13 @@ static int find_xiaomi_usb_path(char *path, size_t max_len) {
                 if (fb && fd_f) {
                     int b = 0, d = 0;
                     if (fscanf(fb, "%d", &b) == 1 && fscanf(fd_f, "%d", &d) == 1) {
-                        snprintf(path, max_len, "/dev/bus/usb/%03d/%03d", b, d);
-                        fclose(fb);
-                        fclose(fd_f);
-                        closedir(dir);
-                        return 0;
+                        if (b > 0 && d > 0) {
+                            snprintf(path, max_len, "/dev/bus/usb/%03d/%03d", b, d);
+                            fclose(fb);
+                            fclose(fd_f);
+                            closedir(dir);
+                            return 0;
+                        }
                     }
                 }
                 if (fb) fclose(fb);
@@ -56,17 +58,31 @@ int main(int argc, char **argv) {
 
     // Cooperative lock between concurrent probes (daemon vs CLI kb)
     int lock_fd = open("/dev/xiaomi_kb_probe.lock", O_RDWR | O_CREAT, 0666);
+    if (lock_fd < 0) {
+        lock_fd = open("/data/local/tmp/xiaomi_kb_probe.lock", O_RDWR | O_CREAT, 0666);
+    }
+    int locked = 0;
     if (lock_fd >= 0) {
         for (int i = 0; i < 15; i++) {
-            if (flock(lock_fd, LOCK_EX | LOCK_NB) == 0) break;
+            if (flock(lock_fd, LOCK_EX | LOCK_NB) == 0) {
+                locked = 1;
+                break;
+            }
             usleep(20000); // 20ms
+        }
+        if (!locked) {
+            close(lock_fd);
+            if (verbose) fprintf(stderr, "Error: Probe lock is held by another process\n");
+            // Exit code 2 (BUSY/TRANSIENT): caller must NOT treat this as DETACHED
+            printf("-1\n");
+            return 2;
         }
     }
 
     char devpath[256] = {0};
     if (find_xiaomi_usb_path(devpath, sizeof(devpath)) != 0) {
         if (verbose) fprintf(stderr, "Error: Xiaomi USB device (VID 3206) not found\n");
-        if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
+        if (locked) { flock(lock_fd, LOCK_UN); close(lock_fd); }
         printf("0\n");
         return 1; // DETACHED
     }
@@ -74,7 +90,7 @@ int main(int argc, char **argv) {
     int fd = open(devpath, O_RDWR | O_CLOEXEC);
     if (fd < 0) {
         if (verbose) fprintf(stderr, "Error: Cannot open USB device %s (errno=%d: %s)\n", devpath, errno, strerror(errno));
-        if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
+        if (locked) { flock(lock_fd, LOCK_UN); close(lock_fd); }
         printf("0\n");
         return 1; // DETACHED
     }
@@ -101,7 +117,7 @@ int main(int argc, char **argv) {
     if (!claimed) {
         if (verbose) perror("ioctl USBDEVFS_CLAIMINTERFACE");
         close(fd);
-        if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
+        if (locked) { flock(lock_fd, LOCK_UN); close(lock_fd); }
         // Exit code 2 (BUSY/TRANSIENT): caller must NOT treat this as DETACHED
         printf("-1\n");
         return 2;
@@ -132,9 +148,10 @@ int main(int argc, char **argv) {
         if (verbose) perror("ioctl USBDEVFS_BULK OUT");
         ioctl(fd, USBDEVFS_RELEASEINTERFACE, &iface);
         close(fd);
-        if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
-        printf("0\n");
-        return 1;
+        if (locked) { flock(lock_fd, LOCK_UN); close(lock_fd); }
+        // Transient bus timeout/error: DO NOT trigger false detach!
+        printf("-1\n");
+        return 2;
     }
 
     unsigned char recv_buf[64] = {0};
@@ -151,14 +168,15 @@ int main(int argc, char **argv) {
         if (verbose) perror("ioctl USBDEVFS_BULK IN");
         ioctl(fd, USBDEVFS_RELEASEINTERFACE, &iface);
         close(fd);
-        if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
-        printf("0\n");
-        return 1;
+        if (locked) { flock(lock_fd, LOCK_UN); close(lock_fd); }
+        // Transient bus timeout/error: DO NOT trigger false detach!
+        printf("-1\n");
+        return 2;
     }
 
     ioctl(fd, USBDEVFS_RELEASEINTERFACE, &iface);
     close(fd);
-    if (lock_fd >= 0) { flock(lock_fd, LOCK_UN); close(lock_fd); }
+    if (locked) { flock(lock_fd, LOCK_UN); close(lock_fd); }
 
     if (verbose) {
         fprintf(stderr, "Received %d bytes. Byte[9] = 0x%02x\n", r, (r > 9 ? recv_buf[9] : 0));
@@ -177,10 +195,17 @@ int main(int argc, char **argv) {
             if ((b9 & 0x63) == 0x23) {
                 printf("1\n");
                 return 0; // ATTACHED
+            } else {
+                printf("0\n");
+                return 1; // DETACHED
             }
         }
     }
 
-    printf("0\n");
-    return 1; // DETACHED
+    if (verbose) {
+        fprintf(stderr, "Warning: Corrupted header or short packet received (%d bytes)\n", r);
+    }
+    // Transient bus noise / short read / corrupted packet: do NOT falsely trigger detach!
+    printf("-1\n");
+    return 2;
 }

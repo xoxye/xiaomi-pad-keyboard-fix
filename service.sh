@@ -86,32 +86,25 @@ bind_usbhid() {
 }
 
 unbind_usbhid() {
-    usb_dev=$(get_usb_dev)
-    if [ -n "$usb_dev" ]; then
-        dev_name="${usb_dev##*/}"
-        for intf in /sys/bus/usb/drivers/usbhid/${dev_name}:1.*; do
-            if [ -e "$intf" ]; then
-                echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/unbind 2>/dev/null
-            fi
-        done
-    else
-        for intf in /sys/bus/usb/drivers/usbhid/*:1.*; do
-            [ -e "$intf" ] && echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/unbind 2>/dev/null
-        done
-    fi
+    for intf in /sys/bus/usb/drivers/usbhid/*:1.*; do
+        [ -e "$intf" ] && echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/unbind 2>/dev/null
+    done
 }
 
 is_screen_on() {
+    has_bl=0
     for bl in /sys/class/backlight/*/brightness; do
         if [ -f "$bl" ]; then
+            has_bl=1
             read -r b < "$bl" 2>/dev/null
             if [ -n "$b" ] && [ "$b" -gt 0 ]; then
                 return 0
-            else
-                return 1
             fi
         fi
     done
+    if [ "$has_bl" -eq 1 ]; then
+        return 1
+    fi
     for dpms_f in /sys/class/drm/*-DSI-*/dpms; do
         if [ -f "$dpms_f" ]; then
             read -r dpms_val < "$dpms_f" 2>/dev/null
@@ -125,27 +118,25 @@ is_screen_on() {
 NODE=$(find_node)
 [ -n "$NODE" ] && [ -f "$NODE" ] && echo "enable_keyboard" > "$NODE" 2>/dev/null
 
-log_msg "Xiaomi Pad Keyboard Engine (v1.0.1) started"
+log_msg "Xiaomi Pad Keyboard Engine (v1.0.1 Ground Truth) started"
 
 # ============================================================================
-# ARCHITECTURE: SINGLE-PROCESS (all variables shared - no subshell isolation)
+# ARCHITECTURE: GROUND TRUTH USB HOTPLUG (immune to kernel IRQ contact bounce)
 # ============================================================================
 
-# INITIAL STATE: keep keyboard bound if USB present, protect until unlock
+# INITIAL STATE: based strictly on USB bus presence
 if is_usb_attached; then
     current_state=1
     bind_usbhid
-    log_msg "Initial: ATTACHED (USB vendor 3206) -> bound, pre-unlock protection"
+    log_msg "Initial: ATTACHED (USB vendor 3206 detected) -> bound, ready for input"
 else
     current_state=0
     unbind_usbhid
-    log_msg "Initial: DETACHED -> unbound, on-screen keypad ready"
+    log_msg "Initial: DETACHED -> unbound, on-screen keyboard ready"
 fi
 
-# State variables (monolithic single-process memory)
-unlock_done=0   # Set to 1 after sys.boot_completed=1
-settle=0        # Post-unlock IRQ-bounce immunity countdown (ticks)
-zero_ticks=0    # Consecutive raw=0 readings for debounce
+unlock_done=0
+zero_ticks=0
 
 # MAIN CONTROL LOOP
 while true; do
@@ -154,97 +145,62 @@ while true; do
     if [ "$unlock_done" -eq 0 ]; then
         if [ "$(getprop sys.boot_completed)" = "1" ] || [ "$(getprop dev.bootcomplete)" = "1" ]; then
             unlock_done=1
-
-            # Background: shell permissions & IME setting (run once, non-blocking)
+            # Configure IME preference in background (never disrupt keyboard power!)
             ( setup_shell_permissions; settings put secure show_ime_with_hard_keyboard 1 2>/dev/null ) </dev/null >/dev/null 2>&1 &
-
-            if is_usb_attached; then
-                # Refresh MCU power to reset handshake after storage decryption
-                if [ -n "$NODE" ] && [ -f "$NODE" ]; then
-                    echo "disable_keyboard" > "$NODE" 2>/dev/null
-                    sleep 0.15
-                    echo "enable_keyboard" > "$NODE" 2>/dev/null
-                fi
-                sleep 1.5
-                bind_usbhid
-                current_state=1
-                settle=40   # 10s non-cancellable immunity window (prevents unbind during post-boot transients)
-                zero_ticks=0
-                log_msg "Post-Unlock: MCU pulse + HID rebound -> ready (settle=10s)"
-                notify_user "Keyboard Cover" "Keyboard is ready for use"
-            else
-                unbind_usbhid
-                current_state=0
-                settle=0
-                log_msg "Post-Unlock: no keyboard -> On-screen keyboard active"
-            fi
+            log_msg "Post-Unlock: boot completed, settings synchronized"
         fi
     fi
 
-    # === READ HARDWARE POGO-PIN IRQ / SENSOR ===
-    raw=0
-    if [ -n "$NODE" ] && [ -f "$NODE" ]; then
-        read -r raw < "$NODE" 2>/dev/null
-        case "$raw" in 1*) raw=1 ;; *) raw=0 ;; esac
-    fi
+    # === CHECK PHYSICAL HARDWARE PRESENCE ON USB BUS ===
+    usb_dev=$(get_usb_dev)
 
-    if [ "$raw" = "1" ]; then
-        # === KEYBOARD ACTIVE (IRQ confirmed) ===
+    if [ -n "$usb_dev" ]; then
+        # KEYBOARD IS PHYSICALLY CONNECTED & COMMUNICATING
         zero_ticks=0
 
         if [ "$current_state" -eq 0 ]; then
-            # INSTANT CONNECT (< 0.25s)
             current_state=1
             bind_usbhid
-            log_msg "ATTACHED (raw=1) -> bound, physical keyboard active"
+            log_msg "ATTACHED (USB vendor 3206) -> bound, physical keyboard active"
             notify_user "Keyboard Cover" "Keyboard connected"
         else
-            # MAINTAIN ACTIVE LINK & AUTO-HEAL
-            usb_dev=$(get_usb_dev)
-            if [ -n "$usb_dev" ]; then
-                if [ -f "$usb_dev/power/control" ]; then
-                    read -r pwr < "$usb_dev/power/control" 2>/dev/null
-                    if [ "$pwr" != "on" ]; then
-                        echo "on" > "$usb_dev/power/control" 2>/dev/null
-                        echo "-1" > "$usb_dev/power/autosuspend" 2>/dev/null
-                    fi
+            # Ensure autosuspend remains disabled
+            if [ -f "$usb_dev/power/control" ]; then
+                read -r pwr < "$usb_dev/power/control" 2>/dev/null
+                if [ "$pwr" != "on" ]; then
+                    echo "on" > "$usb_dev/power/control" 2>/dev/null
+                    echo "-1" > "$usb_dev/power/autosuspend" 2>/dev/null
                 fi
-                dev_name="${usb_dev##*/}"
-                for intf in /sys/bus/usb/devices/${dev_name}:1.*; do
-                    if [ -d "$intf" ] && [ ! -d "/sys/bus/usb/drivers/usbhid/${intf##*/}" ]; then
-                        echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/bind 2>/dev/null
-                    fi
-                done
             fi
+            dev_name="${usb_dev##*/}"
+            for intf in /sys/bus/usb/devices/${dev_name}:1.*; do
+                if [ -d "$intf" ] && [ ! -d "/sys/bus/usb/drivers/usbhid/${intf##*/}" ]; then
+                    echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/bind 2>/dev/null
+                fi
+            done
         fi
     else
-        # === RAW = 0 (detached OR post-boot/post-pulse transient) ===
-
-        # UNBIND DECISION: only after unlock AND settle expired
-        if [ "$unlock_done" -eq 1 ] && [ "$settle" -le 0 ]; then
+        # KEYBOARD IS NOT ON USB BUS (physically detached)
+        if [ "$current_state" -eq 1 ]; then
             zero_ticks=$((zero_ticks + 1))
-
-            # 3 consecutive ticks (0.75s debounce) = confirmed physical detachment
-            if [ "$current_state" -eq 1 ] && [ "$zero_ticks" -ge 3 ]; then
+            # 2 consecutive ticks (0.50s debounce) confirms physical detachment
+            if [ "$zero_ticks" -ge 2 ]; then
                 current_state=0
                 unbind_usbhid
-                # Re-ensure pogo pin bus is enabled on detach transition
+                # Keep pogo-pin VDD energized waiting for next attachment
                 [ -n "$NODE" ] && [ -f "$NODE" ] && echo "enable_keyboard" > "$NODE" 2>/dev/null
-                log_msg "DETACHED (raw=0 x3) -> unbound, On-screen keyboard active"
+                log_msg "DETACHED (USB disconnect x2) -> unbound, On-screen keyboard active"
                 notify_user "Keyboard Cover" "Keyboard disconnected"
             fi
+        else
+            zero_ticks=0
         fi
     fi
 
-    # COUNT DOWN SETTLE IMMUNITY TIMER (unconditionally every tick)
-    if [ "$settle" -gt 0 ]; then
-        settle=$((settle - 1))
-    fi
-
-    # === ADAPTIVE SLEEP: 0.25s screen on, 5.0s screen off (Deep Sleep friendly) ===
+    # === ADAPTIVE SLEEP: 0.25s screen on, 2.0s screen off ===
     if is_screen_on; then
         sleep 0.25
     else
-        sleep 5.0
+        sleep 2.0
     fi
 done

@@ -52,32 +52,25 @@ bind_usbhid() {
 }
 
 unbind_usbhid() {
-    usb_dev=$(get_usb_dev)
-    if [ -n "$usb_dev" ]; then
-        dev_name="${usb_dev##*/}"
-        for intf in /sys/bus/usb/drivers/usbhid/${dev_name}:1.*; do
-            if [ -e "$intf" ]; then
-                echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/unbind 2>/dev/null
-            fi
-        done
-    else
-        for intf in /sys/bus/usb/drivers/usbhid/*:1.*; do
-            [ -e "$intf" ] && echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/unbind 2>/dev/null
-        done
-    fi
+    for intf in /sys/bus/usb/drivers/usbhid/*:1.*; do
+        [ -e "$intf" ] && echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/unbind 2>/dev/null
+    done
 }
 
 is_screen_on() {
+    has_bl=0
     for bl in /sys/class/backlight/*/brightness; do
         if [ -f "$bl" ]; then
+            has_bl=1
             read -r b < "$bl" 2>/dev/null
             if [ -n "$b" ] && [ "$b" -gt 0 ]; then
                 return 0
-            else
-                return 1
             fi
         fi
     done
+    if [ "$has_bl" -eq 1 ]; then
+        return 1
+    fi
     for dpms_f in /sys/class/drm/*-DSI-*/dpms; do
         if [ -f "$dpms_f" ]; then
             read -r dpms_val < "$dpms_f" 2>/dev/null
@@ -111,14 +104,12 @@ case "$ACTION" in
     bind|reset|reconnect)
         echo "=== Force Binding Keyboard Interfaces ==="
         if [ -n "$NODE" ] && [ -f "$NODE" ]; then
-            echo "disable_keyboard" > "$NODE" 2>/dev/null
-            sleep 0.15
             echo "enable_keyboard" > "$NODE" 2>/dev/null
         fi
-        sleep 0.5
+        sleep 0.2
         bind_usbhid
         settings put secure show_ime_with_hard_keyboard 1 2>/dev/null
-        sleep 0.5
+        sleep 0.2
         if is_usb_attached; then
             notify_user "Keyboard Cover" "Keyboard successfully connected!"
             echo "SUCCESS: Keyboard cover bound and ready for typing."
@@ -139,16 +130,14 @@ case "$ACTION" in
         echo "=== 15-Second Hardware State Monitor ==="
         echo "Detach and re-attach keyboard cover to verify auto-detection:"
         echo ""
-        echo "Time     | Pogo-Pin | HID Binding | show_ime | Display"
-        echo "---------+----------+-------------+----------+--------"
+        echo "Time     | USB Bus (3206) | HID Binding | show_ime | Display"
+        echo "---------+----------------+-------------+----------+--------"
         for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-            raw="0"
-            [ -n "$NODE" ] && [ -f "$NODE" ] && read -r raw < "$NODE" 2>/dev/null
-            case "$raw" in 1*) pogo_st="ATTACHED" ;; *) pogo_st="DETACHED" ;; esac
-            
+            usb_st="DETACHED"
             hid_st="UNBOUND "
             usb_d=$(get_usb_dev)
             if [ -n "$usb_d" ]; then
+                usb_st="ATTACHED"
                 dev_n="${usb_d##*/}"
                 [ -d "/sys/bus/usb/drivers/usbhid/${dev_n}:1.0" ] && hid_st="BOUND   "
             fi
@@ -157,7 +146,7 @@ case "$ACTION" in
             if ! is_screen_on; then
                 disp="OFF"
             fi
-            echo "$(date '+%H:%M:%S') | $pogo_st | $hid_st     | $ime        | $disp"
+            echo "$(date '+%H:%M:%S') | $usb_st         | $hid_st     | $ime        | $disp"
             sleep 1
         done
         echo "Test finished."
@@ -185,15 +174,11 @@ case "$ACTION" in
         echo "=== Xiaomi Pad Keyboard Cover Engine Status (v1.0.1) ==="
         echo "Author: xoxye"
         echo "Pogo-pin driver node: ${NODE:-'NOT FOUND'}"
-        
-        raw="0"
-        [ -n "$NODE" ] && [ -f "$NODE" ] && read -r raw < "$NODE" 2>/dev/null
-        echo "Pogo-pin sensor (conn_status): '$raw'"
 
         usb_d=$(get_usb_dev)
         if [ -n "$usb_d" ]; then
             dev_n="${usb_d##*/}"
-            echo "Hardware USB bus device: $usb_d (vendor 3206)"
+            echo "Hardware USB bus device: $usb_d (vendor 3206:3ffc - CONNECTED)"
             hid_st="UNBOUND (on-screen keyboard active)"
             [ -d "/sys/bus/usb/drivers/usbhid/${dev_n}:1.0" ] && hid_st="BOUND (physical input active in EventHub)"
             echo "USB-HID interface binding: $hid_st"

@@ -69,6 +69,13 @@ is_usb_attached() {
     [ -n "$(get_usb_dev)" ]
 }
 
+is_hid_bound() {
+    for intf in /sys/bus/usb/drivers/usbhid/*:1.0; do
+        [ -e "$intf" ] && return 0
+    done
+    return 1
+}
+
 bind_usbhid() {
     usb_dev=$(get_usb_dev)
     if [ -n "$usb_dev" ]; then
@@ -116,36 +123,28 @@ is_screen_on() {
 }
 
 NODE=$(find_node)
-log_msg "Xiaomi Pad Keyboard Engine (v1.0.1 Edge-Triggered) started"
+log_msg "Xiaomi Pad Keyboard Engine (v1.0.1 Level-Directed) started"
 
 # ============================================================================
-# INITIAL BOOT BASELINE & PROTECTION
+# INITIAL BOOT STATE & LOCKSCREEN PROTECTION
 # ============================================================================
 
-init_raw="0"
-if [ -n "$NODE" ] && [ -f "$NODE" ]; then
-    read -r init_raw < "$NODE" 2>/dev/null
-    case "$init_raw" in 1*) init_raw="1" ;; *) init_raw="0" ;; esac
-fi
-
-last_raw="$init_raw"
-
-# Ground truth at boot: Does the USB bus see Vendor 3206?
+boot_has_usb=0
 if is_usb_attached; then
-    current_state=1
+    boot_has_usb=1
     bind_usbhid
-    log_msg "Boot: Keyboard ATTACHED (USB 3206 detected) -> bound (sensor baseline=$last_raw)"
+    log_msg "Boot: Keyboard physically present (USB 3206 detected) -> bound"
 else
-    current_state=0
     unbind_usbhid
-    log_msg "Boot: Keyboard DETACHED (no USB 3206) -> unbound (sensor baseline=$last_raw)"
+    log_msg "Boot: Keyboard not present (no USB 3206) -> unbound"
 fi
 
 unlock_done=0
-cooldown=0
+zero_ticks=0
+one_ticks=0
 
 # ============================================================================
-# MAIN CONTROL LOOP: ROBUST EDGE-TRIGGERED TRANSITION ENGINE
+# MAIN CONTROL LOOP: ROBUST LEVEL-DIRECTED DEBOUNCED ENGINE
 # ============================================================================
 while true; do
 
@@ -165,67 +164,58 @@ while true; do
         case "$raw" in 1*) raw="1" ;; *) raw="0" ;; esac
     fi
 
-    # === DETECT SENSOR EDGE TRANSITIONS ===
-    if [ "$raw" != "$last_raw" ]; then
-        if [ "$cooldown" -eq 0 ]; then
-            # Settle wait 0.15s to allow physical magnetic bounce to finish
-            sleep 0.15
-            if [ -n "$NODE" ] && [ -f "$NODE" ]; then
-                read -r raw < "$NODE" 2>/dev/null
-                case "$raw" in 1*) raw="1" ;; *) raw="0" ;; esac
-            fi
-            last_raw="$raw"
+    if [ "$raw" = "1" ]; then
+        # SENSOR REPORTS ATTACHED
+        zero_ticks=0
 
-            if [ "$current_state" -eq 1 ]; then
-                # TRANSITION: ATTACHED -> DETACHED
-                current_state=0
-                unbind_usbhid
-                cooldown=3 # 0.75s debounce cooldown
-                log_msg "TRANSITION: DETACHED (sensor edge $raw) -> unbound, On-screen keyboard active"
-                notify_user "Keyboard Cover" "Keyboard disconnected"
-            else
-                # TRANSITION: DETACHED -> ATTACHED
-                current_state=1
+        if ! is_hid_bound; then
+            one_ticks=$((one_ticks + 1))
+            # 1 tick (0.25s) debounce to filter noise
+            if [ "$one_ticks" -ge 1 ]; then
                 bind_usbhid
-                cooldown=3 # 0.75s debounce cooldown
-                log_msg "TRANSITION: ATTACHED (sensor edge $raw) -> bound, physical keyboard active"
+                log_msg "TRANSITION: ATTACHED (pogo=1) -> bound, physical keyboard active"
                 notify_user "Keyboard Cover" "Keyboard connected"
             fi
         else
-            # Absorb contact bounce during cooldown
-            last_raw="$raw"
-        fi
-    fi
-
-    if [ "$cooldown" -gt 0 ]; then
-        cooldown=$((cooldown - 1))
-    fi
-
-    # === ACTIVE STATE MAINTENANCE ===
-    if [ "$current_state" -eq 1 ]; then
-        # Keep physical keyboard powered and interfaces bound
-        usb_dev=$(get_usb_dev)
-        if [ -n "$usb_dev" ]; then
-            if [ -f "$usb_dev/power/control" ]; then
-                read -r pwr < "$usb_dev/power/control" 2>/dev/null
-                if [ "$pwr" != "on" ]; then
-                    echo "on" > "$usb_dev/power/control" 2>/dev/null
-                    echo "-1" > "$usb_dev/power/autosuspend" 2>/dev/null
+            one_ticks=0
+            # Auto-heal power control & autosuspend if attached
+            usb_dev=$(get_usb_dev)
+            if [ -n "$usb_dev" ]; then
+                if [ -f "$usb_dev/power/control" ]; then
+                    read -r pwr < "$usb_dev/power/control" 2>/dev/null
+                    if [ "$pwr" != "on" ]; then
+                        echo "on" > "$usb_dev/power/control" 2>/dev/null
+                        echo "-1" > "$usb_dev/power/autosuspend" 2>/dev/null
+                    fi
                 fi
             fi
-            dev_name="${usb_dev##*/}"
-            for intf in /sys/bus/usb/devices/${dev_name}:1.*; do
-                if [ -d "$intf" ] && [ ! -d "/sys/bus/usb/drivers/usbhid/${intf##*/}" ]; then
-                    echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/bind 2>/dev/null
+        fi
+    else
+        # SENSOR REPORTS DETACHED (raw=0)
+        one_ticks=0
+
+        if is_hid_bound; then
+            # Lockscreen PIN protection: do not unbind before boot completes if started with keyboard
+            if [ "$unlock_done" -eq 0 ] && [ "$boot_has_usb" -eq 1 ]; then
+                zero_ticks=0
+            else
+                zero_ticks=$((zero_ticks + 1))
+                # 2 ticks (0.50s) debounce confirms physical detachment
+                if [ "$zero_ticks" -ge 2 ]; then
+                    unbind_usbhid
+                    log_msg "TRANSITION: DETACHED (pogo=0 x2) -> unbound, On-screen keyboard active"
+                    notify_user "Keyboard Cover" "Keyboard disconnected"
                 fi
-            done
+            fi
+        else
+            zero_ticks=0
         fi
     fi
 
-    # === ADAPTIVE SLEEP: 0.25s screen on, 2.0s screen off ===
+    # === ADAPTIVE SLEEP: 0.25s screen on, 5.0s screen off (Deep Sleep) ===
     if is_screen_on; then
         sleep 0.25
     else
-        sleep 2.0
+        sleep 5.0
     fi
 done

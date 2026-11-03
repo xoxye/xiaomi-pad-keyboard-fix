@@ -123,20 +123,31 @@ is_screen_on() {
 }
 
 NODE=$(find_node)
-log_msg "Xiaomi Pad Keyboard Engine (v1.0.1 Level-Directed) started"
+log_msg "Xiaomi Pad Keyboard Engine (v1.0.1 Adaptive Polarity Engine) started"
 
 # ============================================================================
-# INITIAL BOOT STATE & LOCKSCREEN PROTECTION
+# INITIAL BOOT CALIBRATION & HARDWARE PROTECTION
 # ============================================================================
 
-boot_has_usb=0
+init_raw="0"
+if [ -n "$NODE" ] && [ -f "$NODE" ]; then
+    read -r init_raw < "$NODE" 2>/dev/null
+    case "$init_raw" in 1*) init_raw="1" ;; *) init_raw="0" ;; esac
+fi
+
+# Dynamically calibrate baseline polarity based on USB hardware presence at boot
 if is_usb_attached; then
-    boot_has_usb=1
+    attached_raw="$init_raw"
     bind_usbhid
-    log_msg "Boot: Keyboard physically present (USB 3206 detected) -> bound"
+    log_msg "Boot: Keyboard present (USB 3206 detected) -> bound, calibrated attached_raw=$attached_raw"
 else
+    if [ "$init_raw" = "1" ]; then
+        attached_raw="0"
+    else
+        attached_raw="1"
+    fi
     unbind_usbhid
-    log_msg "Boot: Keyboard not present (no USB 3206) -> unbound"
+    log_msg "Boot: Keyboard not present (no USB 3206) -> unbound, calibrated attached_raw=$attached_raw"
 fi
 
 unlock_done=0
@@ -164,16 +175,16 @@ while true; do
         case "$raw" in 1*) raw="1" ;; *) raw="0" ;; esac
     fi
 
-    if [ "$raw" = "1" ]; then
-        # SENSOR REPORTS ATTACHED
+    if [ "$raw" = "$attached_raw" ]; then
+        # SENSOR MATCHES ATTACHED POLARITY
         zero_ticks=0
 
         if ! is_hid_bound; then
             one_ticks=$((one_ticks + 1))
-            # 1 tick (0.25s) debounce to filter noise
+            # 1 tick (0.25s) debounce
             if [ "$one_ticks" -ge 1 ]; then
                 bind_usbhid
-                log_msg "TRANSITION: ATTACHED (pogo=1) -> bound, physical keyboard active"
+                log_msg "TRANSITION: ATTACHED (pogo=$raw) -> bound, physical keyboard active"
                 notify_user "Keyboard Cover" "Keyboard connected"
             fi
         else
@@ -191,21 +202,16 @@ while true; do
             fi
         fi
     else
-        # SENSOR REPORTS DETACHED (raw=0)
+        # SENSOR MATCHES DETACHED POLARITY (raw != attached_raw)
         one_ticks=0
 
         if is_hid_bound; then
-            # Lockscreen PIN protection: do not unbind before boot completes if started with keyboard
-            if [ "$unlock_done" -eq 0 ] && [ "$boot_has_usb" -eq 1 ]; then
-                zero_ticks=0
-            else
-                zero_ticks=$((zero_ticks + 1))
-                # 2 ticks (0.50s) debounce confirms physical detachment
-                if [ "$zero_ticks" -ge 2 ]; then
-                    unbind_usbhid
-                    log_msg "TRANSITION: DETACHED (pogo=0 x2) -> unbound, On-screen keyboard active"
-                    notify_user "Keyboard Cover" "Keyboard disconnected"
-                fi
+            zero_ticks=$((zero_ticks + 1))
+            # 2 consecutive ticks (0.50s) debounce confirms physical detachment
+            if [ "$zero_ticks" -ge 2 ]; then
+                unbind_usbhid
+                log_msg "TRANSITION: DETACHED (pogo=$raw x2) -> unbound, On-screen keyboard active"
+                notify_user "Keyboard Cover" "Keyboard disconnected"
             fi
         else
             zero_ticks=0

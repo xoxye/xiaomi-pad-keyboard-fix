@@ -51,26 +51,37 @@ bind_usbhid() {
     fi
 }
 
+# БЕЗОПАСНЫЙ UNBIND: отвязывает ТОЛЬКО интерфейсы Xiaomi VID 3206
 unbind_usbhid() {
-    for intf in /sys/bus/usb/drivers/usbhid/*:1.*; do
-        [ -e "$intf" ] && echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/unbind 2>/dev/null
-    done
+    usb_dev=$(get_usb_dev)
+    if [ -n "$usb_dev" ]; then
+        dev_name="${usb_dev##*/}"
+        for intf in /sys/bus/usb/drivers/usbhid/${dev_name}:1.*; do
+            [ -e "$intf" ] && echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/unbind 2>/dev/null
+        done
+    else
+        for intf in /sys/bus/usb/drivers/usbhid/*:1.*; do
+            if [ -e "$intf" ]; then
+                real_p=$(readlink -f "$intf" 2>/dev/null)
+                if [ -n "$real_p" ] && [ -f "$real_p/../idVendor" ]; then
+                    read -r v < "$real_p/../idVendor" 2>/dev/null
+                    if [ "$v" = "3206" ]; then
+                        echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/unbind 2>/dev/null
+                    fi
+                fi
+            fi
+        done
+    fi
 }
 
 is_screen_on() {
-    has_bl=0
     for bl in /sys/class/backlight/*/brightness; do
         if [ -f "$bl" ]; then
-            has_bl=1
             read -r b < "$bl" 2>/dev/null
-            if [ -n "$b" ] && [ "$b" -gt 0 ]; then
-                return 0
-            fi
+            [ -n "$b" ] && [ "$b" -gt 0 ] && return 0
+            return 1
         fi
     done
-    if [ "$has_bl" -eq 1 ]; then
-        return 1
-    fi
     for dpms_f in /sys/class/drm/*-DSI-*/dpms; do
         if [ -f "$dpms_f" ]; then
             read -r dpms_val < "$dpms_f" 2>/dev/null
@@ -84,17 +95,9 @@ is_screen_on() {
 notify_user() {
     title="$1"
     msg="$2"
-
     cmd vibrator_manager synced oneshot 80 2>/dev/null || \
-    cmd vibrator_manager feedback -f 1 2>/dev/null || \
     cmd vibrator vibrate 80 "xiaomi_kb" 2>/dev/null
-
-    cmd notification post -S bigtext -t "$title" "xiaomi_kb" "$msg" 2>/dev/null || \
-    su -lp 2000 -c "cmd notification post -S bigtext -t '$title' 'xiaomi_kb' '$msg'" 2>/dev/null
-
-    if [ -x "/data/data/com.termux/files/usr/bin/termux-toast" ]; then
-        /data/data/com.termux/files/usr/bin/termux-toast -s "$title: $msg" 2>/dev/null &
-    fi
+    cmd notification post -S bigtext -t "$title" "xiaomi_kb" "$msg" 2>/dev/null
 }
 
 ACTION="$1"
@@ -108,7 +111,6 @@ case "$ACTION" in
         fi
         sleep 0.2
         bind_usbhid
-        settings put secure show_ime_with_hard_keyboard 1 2>/dev/null
         sleep 0.2
         if is_usb_attached; then
             notify_user "Keyboard Cover" "Keyboard successfully connected!"
@@ -120,8 +122,6 @@ case "$ACTION" in
     notify)
         pm grant com.android.shell android.permission.POST_NOTIFICATIONS 2>/dev/null
         cmd appops set com.android.shell POST_NOTIFICATION allow 2>/dev/null
-        cmd appops set com.android.shell SYSTEM_ALERT_WINDOW allow 2>/dev/null
-        cmd appops set com.android.shell 10021 allow 2>/dev/null
 
         notify_user "Keyboard Cover" "Haptic feedback and notification test succeeded!"
         echo "[kb] Test pulse delivered (vibration + notification)."
@@ -157,8 +157,7 @@ case "$ACTION" in
         ;;
     on|enable|1)
         bind_usbhid
-        settings put secure show_ime_with_hard_keyboard 1 2>/dev/null
-        echo "Keyboard cover: ENABLED (on-screen keyboard accessible)"
+        echo "Keyboard cover: ENABLED (interfaces bound)"
         notify_user "Keyboard Cover" "Keyboard enabled"
         ;;
     off|disable|0)
@@ -199,19 +198,23 @@ case "$ACTION" in
         fi
 
         ime_curr=$(settings get secure show_ime_with_hard_keyboard 2>/dev/null)
-        echo "On-screen keyboard setting (show_ime_with_hard_keyboard): $ime_curr (1=available)"
+        echo "On-screen keyboard setting (show_ime_with_hard_keyboard): $ime_curr"
 
         pid=""
-        if [ -f "/dev/run/xiaomi_kb.pid" ]; then
-            read -r p < "/dev/run/xiaomi_kb.pid" 2>/dev/null
-            [ -n "$p" ] && [ -d "/proc/$p" ] && pid="$p"
-        fi
-        if [ -z "$pid" ] && [ -f "$MODDIR/daemon.pid" ]; then
-            read -r p < "$MODDIR/daemon.pid" 2>/dev/null
-            [ -n "$p" ] && [ -d "/proc/$p" ] && pid="$p"
+        for pf in /dev/xiaomi_kb.pid /dev/run/xiaomi_kb.pid "$MODDIR/daemon.pid"; do
+            if [ -f "$pf" ]; then
+                read -r p < "$pf" 2>/dev/null
+                if [ -n "$p" ] && [ -d "/proc/$p" ]; then
+                    pid="$p"
+                    break
+                fi
+            fi
+        done
+        if [ -z "$pid" ]; then
+            pid=$(pgrep xiaomi_kb 2>/dev/null | head -n 1)
         fi
         if [ -z "$pid" ]; then
-            pid=$(pgrep -f "$MODDIR/service.sh" | grep -v "$$" | head -n 1)
+            pid=$(pgrep -f "$MODDIR/service.sh" 2>/dev/null | grep -v "$$" | head -n 1)
         fi
 
         if [ -n "$pid" ]; then

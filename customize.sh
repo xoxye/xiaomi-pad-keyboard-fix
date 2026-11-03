@@ -43,16 +43,17 @@ ui_print "- Seamless Hotplug & Instant On-Screen Keyboard on Detach: ACTIVE"
 ui_print "- Continuous Pogo-Pin Hardware Power: ACTIVE"
 ui_print "- Instant Dynamic USB-HID Auto-Binding on Attach: ACTIVE"
 ui_print "- Continuous USB Hardware Link (Zero Dropouts): ACTIVE"
-ui_print "- Screen-Off Adaptive Backoff (5.0s sleep for Deep Sleep): ACTIVE"
+ui_print "- Screen-Off Adaptive Backoff (8.0s sleep for Deep Sleep): ACTIVE"
 ui_print "- Safe Process Management (Dedicated PID): ACTIVE"
+
+# Create symlink for xiaomi-keyboard to eliminate duplicate binary (DRY)
+# IMPORTANT: Create symlink BEFORE set_perm_recursive to ensure correct attributes
+ln -sf kb "$MODPATH/system/bin/xiaomi-keyboard"
 
 set_perm_recursive "$MODPATH/system/bin" 0 0 0755 0755
 set_perm "$MODPATH/post-fs-data.sh" 0 0 0755
 set_perm "$MODPATH/service.sh" 0 0 0755
 set_perm "$MODPATH/system/bin/kb" 0 0 0755
-
-# Create symlink for xiaomi-keyboard to eliminate duplicate binary (DRY)
-ln -sf kb "$MODPATH/system/bin/xiaomi-keyboard"
 
 ui_print "- Installation complete! Please reboot."
 ui_print "**********************************************"

@@ -1,12 +1,19 @@
 #!/system/bin/sh
 MODDIR=${0%/*}
 LOGFILE="$MODDIR/service.log"
-PIDFILE="/dev/run/xiaomi_kb.pid"
+PIDFILE="/dev/xiaomi_kb.pid"
 
-# Register dedicated PID file safely
-mkdir -p /dev/run 2>/dev/null
-echo "$$" > "$PIDFILE" 2>/dev/null || PIDFILE="$MODDIR/daemon.pid"
-echo "$$" > "$PIDFILE" 2>/dev/null
+# Set process name for clean detection via pgrep
+echo xiaomi_kb > /proc/self/comm 2>/dev/null
+
+# --- 1. SINGLE-INSTANCE LOCK ---
+if [ -f "$PIDFILE" ]; then
+    old_pid=$(cat "$PIDFILE" 2>/dev/null)
+    if [ -n "$old_pid" ] && [ -d "/proc/$old_pid" ] && [ "$old_pid" -ne "$$" ]; then
+        kill -9 "$old_pid" 2>/dev/null
+    fi
+fi
+echo "$$" > "$PIDFILE" 2>/dev/null || { PIDFILE="$MODDIR/daemon.pid"; echo "$$" > "$PIDFILE"; }
 
 log_msg() {
     if [ -f "$LOGFILE" ] && [ "$(wc -l < "$LOGFILE" 2>/dev/null || echo 0)" -gt 250 ]; then
@@ -15,27 +22,12 @@ log_msg() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOGFILE"
 }
 
-setup_shell_permissions() {
-    pm grant com.android.shell android.permission.POST_NOTIFICATIONS 2>/dev/null
-    cmd appops set com.android.shell POST_NOTIFICATION allow 2>/dev/null
-    cmd appops set com.android.shell SYSTEM_ALERT_WINDOW allow 2>/dev/null
-    cmd appops set com.android.shell 10021 allow 2>/dev/null
-}
-
 notify_user() {
     title="$1"
     msg="$2"
-
     cmd vibrator_manager synced oneshot 80 2>/dev/null || \
-    cmd vibrator_manager feedback -f 1 2>/dev/null || \
     cmd vibrator vibrate 80 "xiaomi_kb" 2>/dev/null
-
-    cmd notification post -S bigtext -t "$title" "xiaomi_kb" "$msg" 2>/dev/null || \
-    su -lp 2000 -c "cmd notification post -S bigtext -t '$title' 'xiaomi_kb' '$msg'" 2>/dev/null
-
-    if [ -x "/data/data/com.termux/files/usr/bin/termux-toast" ]; then
-        /data/data/com.termux/files/usr/bin/termux-toast -s "$title: $msg" 2>/dev/null &
-    fi
+    cmd notification post -S bigtext -t "$title" "xiaomi_kb" "$msg" 2>/dev/null
 }
 
 find_node() {
@@ -65,25 +57,35 @@ get_usb_dev() {
     return 1
 }
 
-is_usb_attached() {
-    [ -n "$(get_usb_dev)" ]
-}
-
-is_hid_bound() {
+# БЕЗОПАСНАЯ ПРОВЕРКА: привязан ли именно интерфейс клавиатуры Xiaomi
+is_kb_bound() {
+    [ -z "$CACHED_USB_DEV" ] && CACHED_USB_DEV=$(get_usb_dev)
+    if [ -n "$CACHED_USB_DEV" ]; then
+        dev_name="${CACHED_USB_DEV##*/}"
+        [ -d "/sys/bus/usb/drivers/usbhid/${dev_name}:1.0" ]
+        return $?
+    fi
     for intf in /sys/bus/usb/drivers/usbhid/*:1.0; do
-        [ -e "$intf" ] && return 0
+        if [ -e "$intf" ]; then
+            real_p=$(readlink -f "$intf" 2>/dev/null)
+            if [ -n "$real_p" ] && [ -f "$real_p/../idVendor" ]; then
+                read -r v < "$real_p/../idVendor" 2>/dev/null
+                [ "$v" = "3206" ] && return 0
+            fi
+        fi
     done
     return 1
 }
 
-bind_usbhid() {
-    usb_dev=$(get_usb_dev)
-    if [ -n "$usb_dev" ]; then
-        if [ -f "$usb_dev/power/control" ]; then
-            echo "on" > "$usb_dev/power/control" 2>/dev/null
-            echo "-1" > "$usb_dev/power/autosuspend" 2>/dev/null
+# БЕЗОПАСНЫЙ BIND: включает питание и вяжет только свои интерфейсы
+bind_keyboard() {
+    CACHED_USB_DEV=$(get_usb_dev)
+    if [ -n "$CACHED_USB_DEV" ]; then
+        if [ -f "$CACHED_USB_DEV/power/control" ]; then
+            echo "on" > "$CACHED_USB_DEV/power/control" 2>/dev/null
+            echo "-1" > "$CACHED_USB_DEV/power/autosuspend" 2>/dev/null
         fi
-        dev_name="${usb_dev##*/}"
+        dev_name="${CACHED_USB_DEV##*/}"
         for intf in /sys/bus/usb/devices/${dev_name}:1.*; do
             if [ -d "$intf" ] && [ ! -d "/sys/bus/usb/drivers/usbhid/${intf##*/}" ]; then
                 echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/bind 2>/dev/null
@@ -92,26 +94,38 @@ bind_usbhid() {
     fi
 }
 
-unbind_usbhid() {
-    for intf in /sys/bus/usb/drivers/usbhid/*:1.*; do
-        [ -e "$intf" ] && echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/unbind 2>/dev/null
-    done
+# БЕЗОПАСНЫЙ UNBIND: отвязывает ТОЛЬКО интерфейсы Xiaomi VID 3206
+unbind_keyboard() {
+    if [ -n "$CACHED_USB_DEV" ]; then
+        dev_name="${CACHED_USB_DEV##*/}"
+        for intf in /sys/bus/usb/drivers/usbhid/${dev_name}:1.*; do
+            [ -e "$intf" ] && echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/unbind 2>/dev/null
+        done
+    else
+        # Запасной поиск: отвязываем только интерфейсы, у которых родительский vid == 3206
+        for intf in /sys/bus/usb/drivers/usbhid/*:1.*; do
+            if [ -e "$intf" ]; then
+                real_p=$(readlink -f "$intf" 2>/dev/null)
+                if [ -n "$real_p" ] && [ -f "$real_p/../idVendor" ]; then
+                    read -r v < "$real_p/../idVendor" 2>/dev/null
+                    if [ "$v" = "3206" ]; then
+                        echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/unbind 2>/dev/null
+                    fi
+                fi
+            fi
+        done
+    fi
+    CACHED_USB_DEV=""
 }
 
 is_screen_on() {
-    has_bl=0
     for bl in /sys/class/backlight/*/brightness; do
         if [ -f "$bl" ]; then
-            has_bl=1
             read -r b < "$bl" 2>/dev/null
-            if [ -n "$b" ] && [ "$b" -gt 0 ]; then
-                return 0
-            fi
+            [ -n "$b" ] && [ "$b" -gt 0 ] && return 0
+            return 1
         fi
     done
-    if [ "$has_bl" -eq 1 ]; then
-        return 1
-    fi
     for dpms_f in /sys/class/drm/*-DSI-*/dpms; do
         if [ -f "$dpms_f" ]; then
             read -r dpms_val < "$dpms_f" 2>/dev/null
@@ -123,94 +137,60 @@ is_screen_on() {
 }
 
 NODE=$(find_node)
-log_msg "Xiaomi Pad Keyboard Engine (v1.0.1 Adaptive Polarity Engine) started"
+CACHED_USB_DEV=$(get_usb_dev)
+log_msg "Xiaomi Pad Keyboard Engine daemon started (PID: $$)"
 
-# ============================================================================
-# INITIAL BOOT CALIBRATION & HARDWARE PROTECTION
-# ============================================================================
-
-init_raw="0"
-if [ -n "$NODE" ] && [ -f "$NODE" ]; then
-    read -r init_raw < "$NODE" 2>/dev/null
-    case "$init_raw" in 1*) init_raw="1" ;; *) init_raw="0" ;; esac
-fi
-
-# Dynamically calibrate baseline polarity based on USB hardware presence at boot
-if is_usb_attached; then
-    attached_raw="$init_raw"
-    bind_usbhid
-    log_msg "Boot: Keyboard present (USB 3206 detected) -> bound, calibrated attached_raw=$attached_raw"
+# Первоначальная инициализация при загрузке
+if [ -n "$CACHED_USB_DEV" ]; then
+    bind_keyboard
+    log_msg "Boot: Physical keyboard detected (VID 3206) -> bound"
 else
-    if [ "$init_raw" = "1" ]; then
-        attached_raw="0"
-    else
-        attached_raw="1"
-    fi
-    unbind_usbhid
-    log_msg "Boot: Keyboard not present (no USB 3206) -> unbound, calibrated attached_raw=$attached_raw"
+    unbind_keyboard
+    log_msg "Boot: Keyboard not present -> idle"
 fi
 
-unlock_done=0
 zero_ticks=0
 one_ticks=0
+unlock_done=0
 
-# ============================================================================
-# MAIN CONTROL LOOP: ROBUST LEVEL-DIRECTED DEBOUNCED ENGINE
-# ============================================================================
 while true; do
-
-    # === ONE-TIME POST-UNLOCK INITIALIZATION ===
+    # Однократная синхронизация после разблокировки экрана
     if [ "$unlock_done" -eq 0 ]; then
         if [ "$(getprop sys.boot_completed)" = "1" ] || [ "$(getprop dev.bootcomplete)" = "1" ]; then
             unlock_done=1
-            ( setup_shell_permissions; settings put secure show_ime_with_hard_keyboard 1 2>/dev/null ) </dev/null >/dev/null 2>&1 &
-            log_msg "Post-Unlock: boot completed, settings synchronized"
+            pm grant com.android.shell android.permission.POST_NOTIFICATIONS 2>/dev/null
+            cmd appops set com.android.shell POST_NOTIFICATION allow 2>/dev/null
+            log_msg "Post-Unlock: boot completed, subsystem ready"
         fi
     fi
 
-    # === READ HARDWARE POGO-PIN SENSOR ===
+    # Считывание статуса с сенсора pogo-pin
     raw="0"
     if [ -n "$NODE" ] && [ -f "$NODE" ]; then
         read -r raw < "$NODE" 2>/dev/null
         case "$raw" in 1*) raw="1" ;; *) raw="0" ;; esac
     fi
 
-    if [ "$raw" = "$attached_raw" ]; then
-        # SENSOR MATCHES ATTACHED POLARITY
+    if [ "$raw" = "1" ]; then
         zero_ticks=0
-
-        if ! is_hid_bound; then
+        if ! is_kb_bound; then
             one_ticks=$((one_ticks + 1))
-            # 1 tick (0.25s) debounce
             if [ "$one_ticks" -ge 1 ]; then
-                bind_usbhid
-                log_msg "TRANSITION: ATTACHED (pogo=$raw) -> bound, physical keyboard active"
+                bind_keyboard
+                log_msg "TRANSITION: ATTACHED -> bound, physical keyboard active"
                 notify_user "Keyboard Cover" "Keyboard connected"
             fi
         else
             one_ticks=0
-            # Auto-heal power control & autosuspend if attached
-            usb_dev=$(get_usb_dev)
-            if [ -n "$usb_dev" ]; then
-                if [ -f "$usb_dev/power/control" ]; then
-                    read -r pwr < "$usb_dev/power/control" 2>/dev/null
-                    if [ "$pwr" != "on" ]; then
-                        echo "on" > "$usb_dev/power/control" 2>/dev/null
-                        echo "-1" > "$usb_dev/power/autosuspend" 2>/dev/null
-                    fi
-                fi
-            fi
         fi
     else
-        # SENSOR MATCHES DETACHED POLARITY (raw != attached_raw)
         one_ticks=0
-
-        if is_hid_bound; then
+        if is_kb_bound; then
             zero_ticks=$((zero_ticks + 1))
-            # 2 consecutive ticks (0.50s) debounce confirms physical detachment
+            # Дебаунс 0.5с для исключения дребезга контактов магнита
             if [ "$zero_ticks" -ge 2 ]; then
-                unbind_usbhid
-                log_msg "TRANSITION: DETACHED (pogo=$raw x2) -> unbound, On-screen keyboard active"
+                unbind_keyboard
+                log_msg "TRANSITION: DETACHED -> unbound, on-screen keyboard active"
                 notify_user "Keyboard Cover" "Keyboard disconnected"
             fi
         else
@@ -218,10 +198,9 @@ while true; do
         fi
     fi
 
-    # === ADAPTIVE SLEEP: 0.25s screen on, 5.0s screen off (Deep Sleep) ===
     if is_screen_on; then
         sleep 0.25
     else
-        sleep 5.0
+        sleep 8.0
     fi
 done

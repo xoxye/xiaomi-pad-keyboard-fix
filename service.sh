@@ -116,10 +116,10 @@ is_screen_on() {
 }
 
 NODE=$(find_node)
-log_msg "Xiaomi Pad Keyboard Engine (v1.0.1 Adaptive Polarity) started"
+log_msg "Xiaomi Pad Keyboard Engine (v1.0.1 Edge-Triggered) started"
 
 # ============================================================================
-# INITIAL BOOT CALIBRATION & HARDWARE PROTECTION
+# INITIAL BOOT BASELINE & PROTECTION
 # ============================================================================
 
 init_raw="0"
@@ -128,28 +128,24 @@ if [ -n "$NODE" ] && [ -f "$NODE" ]; then
     case "$init_raw" in 1*) init_raw="1" ;; *) init_raw="0" ;; esac
 fi
 
-# Determine truth on boot from USB hardware presence
+last_raw="$init_raw"
+
+# Ground truth at boot: Does the USB bus see Vendor 3206?
 if is_usb_attached; then
     current_state=1
     bind_usbhid
-    attached_val="$init_raw"
-    log_msg "Initial: ATTACHED (USB 3206 detected) -> bound, calibrated attached_val=$attached_val"
+    log_msg "Boot: Keyboard ATTACHED (USB 3206 detected) -> bound (sensor baseline=$last_raw)"
 else
     current_state=0
     unbind_usbhid
-    if [ "$init_raw" = "1" ]; then
-        attached_val="0"
-    else
-        attached_val="1"
-    fi
-    log_msg "Initial: DETACHED (no USB 3206) -> unbound, calibrated attached_val=$attached_val"
+    log_msg "Boot: Keyboard DETACHED (no USB 3206) -> unbound (sensor baseline=$last_raw)"
 fi
 
 unlock_done=0
-zero_ticks=0
+cooldown=0
 
 # ============================================================================
-# MAIN CONTROL LOOP
+# MAIN CONTROL LOOP: ROBUST EDGE-TRIGGERED TRANSITION ENGINE
 # ============================================================================
 while true; do
 
@@ -169,60 +165,60 @@ while true; do
         case "$raw" in 1*) raw="1" ;; *) raw="0" ;; esac
     fi
 
-    if [ "$raw" = "$attached_val" ]; then
-        # SENSOR MATCHES ATTACHED STATE
-        zero_ticks=0
+    # === DETECT SENSOR EDGE TRANSITIONS ===
+    if [ "$raw" != "$last_raw" ]; then
+        if [ "$cooldown" -eq 0 ]; then
+            # Settle wait 0.15s to allow physical magnetic bounce to finish
+            sleep 0.15
+            if [ -n "$NODE" ] && [ -f "$NODE" ]; then
+                read -r raw < "$NODE" 2>/dev/null
+                case "$raw" in 1*) raw="1" ;; *) raw="0" ;; esac
+            fi
+            last_raw="$raw"
 
-        if [ "$current_state" -eq 0 ]; then
-            # Transition DETACHED -> ATTACHED
-            if is_usb_attached; then
-                current_state=1
-                bind_usbhid
-                log_msg "ATTACHED (pogo=$raw, USB detected) -> bound, physical keyboard active"
-                notify_user "Keyboard Cover" "Keyboard connected"
-            fi
-        else
-            # Already attached: auto-heal & prevent autosuspend
-            usb_dev=$(get_usb_dev)
-            if [ -n "$usb_dev" ]; then
-                if [ -f "$usb_dev/power/control" ]; then
-                    read -r pwr < "$usb_dev/power/control" 2>/dev/null
-                    if [ "$pwr" != "on" ]; then
-                        echo "on" > "$usb_dev/power/control" 2>/dev/null
-                        echo "-1" > "$usb_dev/power/autosuspend" 2>/dev/null
-                    fi
-                fi
-                dev_name="${usb_dev##*/}"
-                for intf in /sys/bus/usb/devices/${dev_name}:1.*; do
-                    if [ -d "$intf" ] && [ ! -d "/sys/bus/usb/drivers/usbhid/${intf##*/}" ]; then
-                        echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/bind 2>/dev/null
-                    fi
-                done
-            fi
-        fi
-    else
-        # SENSOR MATCHES DETACHED STATE (raw != attached_val)
-        if [ "$current_state" -eq 1 ]; then
-            zero_ticks=$((zero_ticks + 1))
-            # 2 consecutive ticks (0.50s debounce) confirms physical detachment
-            if [ "$zero_ticks" -ge 2 ]; then
+            if [ "$current_state" -eq 1 ]; then
+                # TRANSITION: ATTACHED -> DETACHED
                 current_state=0
                 unbind_usbhid
-                log_msg "DETACHED (pogo=$raw x2) -> unbound, On-screen keyboard active"
+                cooldown=3 # 0.75s debounce cooldown
+                log_msg "TRANSITION: DETACHED (sensor edge $raw) -> unbound, On-screen keyboard active"
                 notify_user "Keyboard Cover" "Keyboard disconnected"
-            fi
-        else
-            zero_ticks=0
-            # WATCHDOG / SELF-HEAL:
-            # If current_state is 0 (marked detached), but USB 3206 is actually present on bus,
-            # then polarity was flipped by contact bounce! Auto-correct immediately.
-            if is_usb_attached; then
-                attached_val="$raw"
+            else
+                # TRANSITION: DETACHED -> ATTACHED
                 current_state=1
                 bind_usbhid
-                log_msg "AUTO-CORRECT: USB 3206 present while marked detached -> recalibrated attached_val=$attached_val, bound"
+                cooldown=3 # 0.75s debounce cooldown
+                log_msg "TRANSITION: ATTACHED (sensor edge $raw) -> bound, physical keyboard active"
                 notify_user "Keyboard Cover" "Keyboard connected"
             fi
+        else
+            # Absorb contact bounce during cooldown
+            last_raw="$raw"
+        fi
+    fi
+
+    if [ "$cooldown" -gt 0 ]; then
+        cooldown=$((cooldown - 1))
+    fi
+
+    # === ACTIVE STATE MAINTENANCE ===
+    if [ "$current_state" -eq 1 ]; then
+        # Keep physical keyboard powered and interfaces bound
+        usb_dev=$(get_usb_dev)
+        if [ -n "$usb_dev" ]; then
+            if [ -f "$usb_dev/power/control" ]; then
+                read -r pwr < "$usb_dev/power/control" 2>/dev/null
+                if [ "$pwr" != "on" ]; then
+                    echo "on" > "$usb_dev/power/control" 2>/dev/null
+                    echo "-1" > "$usb_dev/power/autosuspend" 2>/dev/null
+                fi
+            fi
+            dev_name="${usb_dev##*/}"
+            for intf in /sys/bus/usb/devices/${dev_name}:1.*; do
+                if [ -d "$intf" ] && [ ! -d "/sys/bus/usb/drivers/usbhid/${intf##*/}" ]; then
+                    echo "${intf##*/}" > /sys/bus/usb/drivers/usbhid/bind 2>/dev/null
+                fi
+            done
         fi
     fi
 
